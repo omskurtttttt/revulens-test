@@ -1,0 +1,26 @@
+{
+  "pipeline": "TF-IDF (1-2 grams) + LinearSVC (Sigmoid Calibrated)",
+  "train_samples": 32312,
+  "val_samples": 4039,
+  "test_samples": 4040,
+  "metrics": {
+    "accuracy": 0.9316662540232731,
+    "precision_cg": 0.9337649402390438,
+    "recall_cg": 0.9291377601585729,
+    "f1_cg": 0.9314456035767511,
+    "brier_score": 0.05251088626366101,
+    "ece": 0.025165902145355204,
+    "mean_conf_correct": 0.922176140562509,
+    "mean_conf_incorrect": 0.7020167607191311,
+    "confusion_matrix": [
+      [
+        1888,
+        133
+      ],
+      [
+        143,
+        1875
+      ]
+    ]
+  }
+}
