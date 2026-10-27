@@ -1,0 +1,25 @@
+# Skills and agent directories (excluded per user directive)
+.agents/
+skills/
+.gemini/
+
+# Project guidelines (excluded per user directive)
+GEMINI.md
+
+# Python & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.ipynb_checkpoints/
+*.npy
+
+# Large datasets & raw data (keep repository lightweight)
+*.csv
+data/
+downloads/
+
+# OS and IDE files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
