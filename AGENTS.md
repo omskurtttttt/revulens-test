@@ -31,3 +31,10 @@ Laging tandaan at gamitin ang mga sumusunod na core skill sets at practices sa b
 - **Spec & Planning (`spec-driven-development`, `planning-and-task-breakdown`)**: Planuhin ang mga multi-step tasks at panatilihing maliit at incremental ang changes.
 - **Code Simplification & Quality (`code-simplification`, `code-review-and-quality`)**: I-review ang diffs at linisin ang unnecessary complexity.
 - **Debugging & Error Recovery (`debugging-and-error-recovery`)**: Systematic root-cause debugging sa halip na trial-and-error patching.
+
+---
+
+## 5. Git Commit & Push Guidelines
+- **Huwag kailanman isama ang "Day X" o "Day 1/2/3" sa commit message**: Panatilihing malinis at concise (hal. `feat: implement data pipeline and baseline`).
+- **Laging i-exclude ang skills (`.agents/`) at `GEMINI.md`**: Hindi dapat mai-push sa remote repo.
+
