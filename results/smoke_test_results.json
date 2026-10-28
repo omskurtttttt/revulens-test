@@ -1,0 +1,47 @@
+{
+  "distilbert-base-multilingual-cased": {
+    "model_name": "distilbert-base-multilingual-cased",
+    "sample_size": 2000,
+    "max_length": 128,
+    "load_time_sec": 21.3,
+    "infer_time_sec": 144.1,
+    "total_time_sec": 165.4,
+    "reviews_per_sec": 13.88,
+    "peak_memory_mb": 709.67,
+    "embedding_shape": [
+      2000,
+      768
+    ],
+    "has_nan": false
+  },
+  "xlm-roberta-base": {
+    "model_name": "xlm-roberta-base",
+    "sample_size": 2000,
+    "max_length": 128,
+    "load_time_sec": 32.93,
+    "infer_time_sec": 278.47,
+    "total_time_sec": 311.4,
+    "reviews_per_sec": 7.18,
+    "peak_memory_mb": 1115.62,
+    "embedding_shape": [
+      2000,
+      768
+    ],
+    "has_nan": false
+  },
+  "jcblaise/roberta-tagalog-base": {
+    "model_name": "jcblaise/roberta-tagalog-base",
+    "sample_size": 2000,
+    "max_length": 128,
+    "load_time_sec": 18.53,
+    "infer_time_sec": 281.51,
+    "total_time_sec": 300.04,
+    "reviews_per_sec": 7.1,
+    "peak_memory_mb": 21.43,
+    "embedding_shape": [
+      2000,
+      768
+    ],
+    "has_nan": false
+  }
+}

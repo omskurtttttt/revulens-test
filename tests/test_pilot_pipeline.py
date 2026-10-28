@@ -4,7 +4,16 @@ import pandas as pd
 import numpy as np
 
 # We will import from pilot once implemented
-from pilot import normalize_text, load_dataset, split_dataset, compute_metrics, ECEEvaluator
+from pilot import (
+    normalize_text,
+    load_dataset,
+    split_dataset,
+    compute_metrics,
+    ECEEvaluator,
+    mean_pooling,
+    FeatureExtractor,
+    get_or_compute_embeddings,
+)
 
 def test_normalize_text():
     # HTML removal
@@ -125,3 +134,55 @@ def test_compute_metrics():
     assert metrics["ece"] < 0.15
     assert metrics["mean_conf_correct"] > 0.90
     assert np.isnan(metrics["mean_conf_incorrect"]) or metrics["mean_conf_incorrect"] == 0.0
+
+def test_mean_pooling_function():
+    import torch
+    # 2 samples, seq_len 3, dim 2
+    token_emb = torch.tensor([
+        [[2.0, 4.0], [4.0, 8.0], [0.0, 0.0]], # 2 valid tokens -> mean should be [3.0, 6.0]
+        [[1.0, 1.0], [3.0, 3.0], [5.0, 5.0]]  # 3 valid tokens -> mean should be [3.0, 3.0]
+    ])
+    mask = torch.tensor([
+        [1, 1, 0],
+        [1, 1, 1]
+    ])
+    pooled = mean_pooling(token_emb, mask)
+    assert pooled.shape == (2, 2)
+    assert torch.allclose(pooled[0], torch.tensor([3.0, 6.0]))
+    assert torch.allclose(pooled[1], torch.tensor([3.0, 3.0]))
+
+def test_feature_extractor_extraction():
+    # Use distilbert since its weights are already cached
+    extractor = FeatureExtractor("distilbert-base-multilingual-cased", batch_size=2)
+    samples = ["Great item!", "Medyo sira yung box."]
+    emb = extractor.extract(samples, max_length=32)
+    assert isinstance(emb, np.ndarray)
+    assert emb.shape == (2, 768)
+    assert emb.dtype == np.float32
+    assert not np.isnan(emb).any()
+
+def test_get_or_compute_embeddings(tmp_path):
+    samples = ["First test review.", "Second test review."]
+    cache_dir = str(tmp_path / "cache")
+    
+    # Compute and save
+    emb1 = get_or_compute_embeddings(
+        model_name="distilbert-base-multilingual-cased",
+        split_name="test_split",
+        texts=samples,
+        cache_dir=cache_dir,
+        max_length=32,
+        batch_size=2
+    )
+    assert emb1.shape == (2, 768)
+    
+    # Reload from cache
+    emb2 = get_or_compute_embeddings(
+        model_name="distilbert-base-multilingual-cased",
+        split_name="test_split",
+        texts=samples,
+        cache_dir=cache_dir,
+        max_length=32,
+        batch_size=2
+    )
+    assert np.array_equal(emb1, emb2)

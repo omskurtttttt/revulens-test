@@ -12,6 +12,8 @@ import re
 import html
 import json
 import random
+import time
+import tracemalloc
 from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
@@ -37,6 +39,12 @@ FIRECS_TEST_PATH = r"C:\Users\jessica\Downloads\thesis dataset\FiReCS_test_set.c
 RANDOM_SEED = 42
 RESULTS_DIR = "results"
 DATA_CACHE_DIR = "data"
+
+CANDIDATE_ENCODERS = [
+    "distilbert-base-multilingual-cased",
+    "xlm-roberta-base",
+    "jcblaise/roberta-tagalog-base"
+]
 
 
 def set_seed(seed: int = RANDOM_SEED) -> None:
@@ -299,6 +307,177 @@ def compute_metrics(
     }
 
 
+def mean_pooling(token_embeddings: Any, attention_mask: Any) -> Any:
+    """Mean pooling over token embeddings taking attention mask into account."""
+    import torch
+    input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+    sum_embeddings = torch.sum(token_embeddings * input_mask_expanded, dim=1)
+    sum_mask = torch.clamp(input_mask_expanded.sum(dim=1), min=1e-9)
+    return sum_embeddings / sum_mask
+
+
+class FeatureExtractor:
+    """Frozen transformer encoder with attention-mask mean pooling."""
+
+    def __init__(
+        self,
+        model_name: str,
+        device: Optional[str] = None,
+        batch_size: int = 64
+    ) -> None:
+        import torch
+        from transformers import AutoTokenizer, AutoModel
+
+        self.model_name = model_name
+        self.batch_size = batch_size
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = torch.device(device)
+
+        print(f"Loading {model_name} onto {self.device}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name).to(self.device)
+        self.model.eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def extract(self, texts: List[str], max_length: int = 128) -> np.ndarray:
+        import torch
+
+        all_embeddings = []
+        n_samples = len(texts)
+        for i in range(0, n_samples, self.batch_size):
+            batch = texts[i:i + self.batch_size]
+            encoded = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+                return_tensors="pt"
+            ).to(self.device)
+
+            with torch.inference_mode():
+                outputs = self.model(**encoded)
+                token_embeddings = outputs[0]
+                pooled = mean_pooling(token_embeddings, encoded["attention_mask"])
+                all_embeddings.append(pooled.cpu().numpy().astype(np.float32))
+
+        if not all_embeddings:
+            return np.empty((0, 768), dtype=np.float32)
+        return np.vstack(all_embeddings)
+
+
+def get_cache_filename(model_name: str, split_name: str, max_length: int = 128) -> str:
+    safe_name = model_name.replace("/", "_").replace("-", "_")
+    return f"embeddings_{safe_name}_{split_name}_len{max_length}.npy"
+
+
+def get_or_compute_embeddings(
+    model_name: str,
+    split_name: str,
+    texts: List[str],
+    cache_dir: str = DATA_CACHE_DIR,
+    max_length: int = 128,
+    batch_size: int = 64,
+    extractor: Optional[FeatureExtractor] = None
+) -> np.ndarray:
+    """Load cached .npy embeddings from disk or compute and cache them."""
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_path = os.path.join(cache_dir, get_cache_filename(model_name, split_name, max_length))
+    if os.path.exists(cache_path):
+        print(f"Loading cached embeddings: {cache_path}")
+        return np.load(cache_path)
+
+    print(f"Computing embeddings for {model_name} on '{split_name}' ({len(texts)} texts, max_len={max_length})...")
+    if extractor is None:
+        extractor = FeatureExtractor(model_name, batch_size=batch_size)
+
+    t0 = time.time()
+    embeddings = extractor.extract(texts, max_length=max_length)
+    elapsed = time.time() - t0
+    np.save(cache_path, embeddings)
+    print(f"Computed & cached {len(texts)} embeddings in {elapsed:.2f}s ({len(texts)/max(elapsed, 0.001):.1f} reviews/s) -> {cache_path}")
+    return embeddings
+
+
+def run_smoke_test(
+    sample_texts: List[str],
+    models: Optional[List[str]] = None,
+    sample_size: int = 2000,
+    max_length: int = 128,
+    batch_size: int = 64
+) -> Dict[str, Any]:
+    """Step 4 requirement: Smoke test on 2,000-review sample to check speed and memory.
+    
+    Reports time per encoder, RAM usage, and embedding shape.
+    """
+    if models is None:
+        models = CANDIDATE_ENCODERS
+
+    eval_texts = sample_texts[:sample_size]
+    print(f"\n==========================================")
+    print(f"=== SMOKE TEST: {len(eval_texts)} Reviews ===")
+    print(f"==========================================")
+
+    results = {}
+    for model_name in models:
+        print(f"\n--- Smoke Testing: {model_name} ---")
+        tracemalloc.start()
+        t0 = time.time()
+
+        extractor = FeatureExtractor(model_name, batch_size=batch_size)
+        t_load = time.time() - t0
+
+        t_infer_start = time.time()
+        embs = extractor.extract(eval_texts, max_length=max_length)
+        infer_time = time.time() - t_infer_start
+        total_time = time.time() - t0
+
+        current_mem, peak_mem = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+
+        speed = len(eval_texts) / max(infer_time, 0.001)
+        peak_mb = peak_mem / (1024 * 1024)
+
+        report = {
+            "model_name": model_name,
+            "sample_size": len(eval_texts),
+            "max_length": max_length,
+            "load_time_sec": round(t_load, 2),
+            "infer_time_sec": round(infer_time, 2),
+            "total_time_sec": round(total_time, 2),
+            "reviews_per_sec": round(speed, 2),
+            "peak_memory_mb": round(peak_mb, 2),
+            "embedding_shape": list(embs.shape),
+            "has_nan": bool(np.isnan(embs).any())
+        }
+        results[model_name] = report
+        print(f"Result for {model_name}:")
+        print(f"  Load Time:      {report['load_time_sec']}s")
+        print(f"  Inference Time: {report['infer_time_sec']}s ({report['reviews_per_sec']} reviews/sec)")
+        print(f"  Peak Memory:    {report['peak_memory_mb']} MB")
+        print(f"  Shape:          {report['embedding_shape']}, Has NaNs: {report['has_nan']}")
+
+    # Save smoke test report in JSON and Markdown
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    smoke_file = os.path.join(RESULTS_DIR, "smoke_test_results.json")
+    with open(smoke_file, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2)
+
+    smoke_md = os.path.join(RESULTS_DIR, "smoke_test_results.md")
+    with open(smoke_md, "w", encoding="utf-8") as f:
+        f.write("# Smoke Test Results (2,000-Review Sample)\n\n")
+        f.write("| Model | Load Time (s) | Inference Time (s) | Speed (reviews/s) | Peak Memory (MB) | Embedding Shape |\n")
+        f.write("| :--- | :---: | :---: | :---: | :---: | :---: |\n")
+        for m, rep in results.items():
+            f.write(f"| `{m}` | {rep['load_time_sec']} | {rep['infer_time_sec']} | {rep['reviews_per_sec']} | {rep['peak_memory_mb']} | {rep['embedding_shape']} |\n")
+
+    print(f"\nSmoke test complete. Results saved to: {smoke_file} and {smoke_md}")
+
+    return results
+
+
 def train_baseline_tfidf(
     train_texts: List[str],
     train_labels: np.ndarray,
@@ -424,5 +603,103 @@ def run_day_1(dataset_path: str = SALMINEN_DATA_PATH) -> Dict[str, Any]:
     return day1_results
 
 
+def run_day_2(
+    dataset_path: str = SALMINEN_DATA_PATH,
+    max_length: int = 128,
+    batch_size: int = 64
+) -> Dict[str, Any]:
+    """Execute Day 2 workflow:
+    1. Set seed
+    2. Load preprocessed dataset and load splits
+    3. Run smoke test on 2,000-review sample for all 3 encoders
+    4. Extract and cache embeddings for Train, Val, Test for each encoder
+    """
+    set_seed(RANDOM_SEED)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+
+    print(">>> Day 2: Loading dataset and stratified splits...")
+    df = load_dataset(dataset_path, verbose=False)
+    splits_path = os.path.join(DATA_CACHE_DIR, "split_indices.json")
+    splits = split_dataset(df, seed=RANDOM_SEED, save_path=splits_path)
+
+    train_df = df.iloc[splits["train"]].reset_index(drop=True)
+    val_df = df.iloc[splits["val"]].reset_index(drop=True)
+    test_df = df.iloc[splits["test"]].reset_index(drop=True)
+
+    # 1. Smoke test on 2,000-review sample (Step 4 of GEMINI.md)
+    print("\n>>> Step 4: Running smoke test on 2,000 reviews...")
+    smoke_results = run_smoke_test(
+        sample_texts=train_df["text"].tolist(),
+        models=CANDIDATE_ENCODERS,
+        sample_size=2000,
+        max_length=max_length,
+        batch_size=batch_size
+    )
+
+    # 2. Extract and cache embeddings for each encoder (Step 5 of GEMINI.md)
+    print("\n>>> Step 5: Extracting and caching embeddings for all splits...")
+    cached_info = {}
+    for model_name in CANDIDATE_ENCODERS:
+        print(f"\n--- Processing Encoder: {model_name} ---")
+        extractor = FeatureExtractor(model_name, batch_size=batch_size)
+
+        # Validation split
+        val_emb = get_or_compute_embeddings(
+            model_name=model_name,
+            split_name="val",
+            texts=val_df["text"].tolist(),
+            cache_dir=DATA_CACHE_DIR,
+            max_length=max_length,
+            batch_size=batch_size,
+            extractor=extractor
+        )
+
+        # Test split
+        test_emb = get_or_compute_embeddings(
+            model_name=model_name,
+            split_name="test",
+            texts=test_df["text"].tolist(),
+            cache_dir=DATA_CACHE_DIR,
+            max_length=max_length,
+            batch_size=batch_size,
+            extractor=extractor
+        )
+
+        # Train split
+        train_emb = get_or_compute_embeddings(
+            model_name=model_name,
+            split_name="train",
+            texts=train_df["text"].tolist(),
+            cache_dir=DATA_CACHE_DIR,
+            max_length=max_length,
+            batch_size=batch_size,
+            extractor=extractor
+        )
+
+        cached_info[model_name] = {
+            "train_shape": list(train_emb.shape),
+            "val_shape": list(val_emb.shape),
+            "test_shape": list(test_emb.shape),
+        }
+
+    day2_results = {
+        "smoke_test": smoke_results,
+        "cached_embeddings": cached_info
+    }
+    with open(os.path.join(RESULTS_DIR, "day2_feature_extraction_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(day2_results, f, indent=2)
+
+    print(f"\n[DONE] Day 2 executed successfully. Summary saved to {RESULTS_DIR}/day2_feature_extraction_summary.json")
+    return day2_results
+
+
 if __name__ == "__main__":
-    run_day_1()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "day1":
+        run_day_1()
+    elif len(sys.argv) > 1 and sys.argv[1] == "day2":
+        run_day_2()
+    else:
+        # Default to running Day 2 when invoked directly
+        run_day_2()
