@@ -588,19 +588,19 @@ def run_day_1(dataset_path: str = SALMINEN_DATA_PATH) -> Dict[str, Any]:
         val_labels=val_df["label"].values
     )
 
-    # Save Day 1 baseline validation metrics to results/
-    day1_results = {
+    # Save baseline validation metrics to results/
+    baseline_results = {
         "pipeline": "TF-IDF (1-2 grams) + LinearSVC (Sigmoid Calibrated)",
         "train_samples": len(train_df),
         "val_samples": len(val_df),
         "test_samples": len(test_df),
         "metrics": val_metrics
     }
-    with open(os.path.join(RESULTS_DIR, "day1_baseline_metrics.json"), "w", encoding="utf-8") as f:
-        json.dump(day1_results, f, indent=2)
+    with open(os.path.join(RESULTS_DIR, "baseline_metrics.json"), "w", encoding="utf-8") as f:
+        json.dump(baseline_results, f, indent=2)
 
-    print(f"\n[DONE] Day 1 executed successfully. Results saved to {RESULTS_DIR}/day1_baseline_metrics.json")
-    return day1_results
+    print(f"\n[DONE] Baseline pipeline executed successfully. Results saved to {RESULTS_DIR}/baseline_metrics.json")
+    return baseline_results
 
 
 def run_day_2(
@@ -683,23 +683,27 @@ def run_day_2(
             "test_shape": list(test_emb.shape),
         }
 
-    day2_results = {
+    feature_extraction_results = {
         "smoke_test": smoke_results,
         "cached_embeddings": cached_info
     }
-    with open(os.path.join(RESULTS_DIR, "day2_feature_extraction_summary.json"), "w", encoding="utf-8") as f:
-        json.dump(day2_results, f, indent=2)
+    with open(os.path.join(RESULTS_DIR, "feature_extraction_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(feature_extraction_results, f, indent=2)
 
-    print(f"\n[DONE] Day 2 executed successfully. Summary saved to {RESULTS_DIR}/day2_feature_extraction_summary.json")
-    return day2_results
+    print(f"\n[DONE] Feature extraction workflow executed successfully. Summary saved to {RESULTS_DIR}/feature_extraction_summary.json")
+    return feature_extraction_results
+
+
+run_baseline = run_day_1
+run_feature_extraction = run_day_2
 
 
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "day1":
-        run_day_1()
-    elif len(sys.argv) > 1 and sys.argv[1] == "day2":
-        run_day_2()
+    if len(sys.argv) > 1 and sys.argv[1] in ("baseline", "day1"):
+        run_baseline()
+    elif len(sys.argv) > 1 and sys.argv[1] in ("features", "day2"):
+        run_feature_extraction()
     else:
-        # Default to running Day 2 when invoked directly
-        run_day_2()
+        # Default to running feature extraction when invoked directly
+        run_feature_extraction()
