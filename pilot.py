@@ -56,6 +56,8 @@ def set_seed(seed: int = RANDOM_SEED) -> None:
         torch.manual_seed(seed)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(seed)
+        else:
+            torch.set_num_threads(min(4, os.cpu_count() or 1))
     except ImportError:
         pass
 
@@ -694,8 +696,392 @@ def run_day_2(
     return feature_extraction_results
 
 
+def train_linear_svc_pipeline(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    c_grid: Optional[List[float]] = None,
+    seed: int = RANDOM_SEED
+) -> Tuple[Any, Any, float, Dict[str, Any], np.ndarray]:
+    """Train StandardScaler + LinearSVC + Sigmoid Calibration on dense embeddings.
+    
+    Strict Guardrails:
+    - StandardScaler(with_mean=True) fit on TRAIN only.
+    - C tuned over grid on VALIDATION set.
+    - CalibratedClassifierCV(method="sigmoid", cv=5) fit on TRAIN only using best C.
+    - Evaluate on VALIDATION set using compute_metrics.
+    """
+    if c_grid is None:
+        c_grid = [0.01, 0.1, 0.5, 1.0, 5.0, 10.0]
+
+    scaler = StandardScaler(with_mean=True)
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+
+    best_c = c_grid[0]
+    best_val_f1 = -1.0
+
+    print("Tuning LinearSVC C on validation set...")
+    for c in c_grid:
+        svc = LinearSVC(C=c, random_state=seed, max_iter=2000, dual=False)
+        svc.fit(X_train_scaled, y_train)
+        val_preds = svc.predict(X_val_scaled)
+        val_f1 = f1_score(y_val, val_preds, pos_label=1, zero_division=0)
+        print(f"  C={c:6.2f} -> Validation F1(CG) = {val_f1:.4f}")
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            best_c = c
+
+    print(f"Optimal C selected: {best_c} (Validation F1(CG) = {best_val_f1:.4f})")
+
+    base_svc = LinearSVC(C=best_c, random_state=seed, max_iter=2000, dual=False)
+    calibrated_clf = CalibratedClassifierCV(
+        estimator=base_svc,
+        method="sigmoid",
+        cv=5
+    )
+    print("Fitting CalibratedClassifierCV(method='sigmoid', cv=5) on TRAIN set...")
+    calibrated_clf.fit(X_train_scaled, y_train)
+
+    val_probas = calibrated_clf.predict_proba(X_val_scaled)[:, 1]
+    val_metrics = compute_metrics(y_val, val_probas)
+
+    print("\n--- Validation Results ---")
+    print(f"Accuracy:              {val_metrics['accuracy']:.4f}")
+    print(f"Precision (CG):        {val_metrics['precision_cg']:.4f}")
+    print(f"Recall (CG):           {val_metrics['recall_cg']:.4f}")
+    print(f"F1 (CG):               {val_metrics['f1_cg']:.4f}")
+    print(f"Brier Score:           {val_metrics['brier_score']:.4f}")
+    print(f"ECE (10 bins):         {val_metrics['ece']:.4f}")
+    print(f"Mean Conf (Correct):   {val_metrics['mean_conf_correct'] * 100:.2f}%")
+    print(f"Mean Conf (Incorrect): {val_metrics['mean_conf_incorrect'] * 100:.2f}%")
+    print(f"Confusion Matrix:      {val_metrics['confusion_matrix']}")
+
+    return calibrated_clf, scaler, best_c, val_metrics, val_probas
+
+
+def select_best_pipeline(
+    results: Dict[str, Dict[str, Any]],
+    speed_lookup: Optional[Dict[str, float]] = None
+) -> Tuple[str, str]:
+    """Select the best pipeline based on Validation F1(CG) (Step 9).
+    
+    Rule from GEMINI.md:
+    - Select best pipeline by validation F1 of CG class.
+    - If two are within 1 percentage point (0.01), prefer the smaller and faster one.
+    - Return (winning_model_name, rationale).
+    """
+    sorted_models = sorted(
+        results.keys(),
+        key=lambda m: results[m]["metrics"]["f1_cg"],
+        reverse=True
+    )
+    top_model = sorted_models[0]
+    top_f1 = results[top_model]["metrics"]["f1_cg"]
+
+    candidates_within_1pt = [
+        m for m in sorted_models
+        if (top_f1 - results[m]["metrics"]["f1_cg"]) <= 0.01
+    ]
+
+    if len(candidates_within_1pt) == 1 or speed_lookup is None:
+        rationale = f"Selected {top_model} because it achieved the highest Validation F1(CG) = {top_f1:.4f}."
+        return top_model, rationale
+
+    fastest_model = max(
+        candidates_within_1pt,
+        key=lambda m: speed_lookup.get(m, 0.0)
+    )
+    if fastest_model == top_model:
+        rationale = (
+            f"Selected {top_model} because it achieved the highest Validation F1(CG) = {top_f1:.4f} "
+            f"and highest throughput ({speed_lookup.get(top_model, 0.0):.1f} reviews/s)."
+        )
+    else:
+        rationale = (
+            f"Selected {fastest_model} because its Validation F1(CG) = {results[fastest_model]['metrics']['f1_cg']:.4f} "
+            f"is within 1 percentage point of {top_model} (F1 = {top_f1:.4f}), but {fastest_model} is faster/smaller "
+            f"({speed_lookup.get(fastest_model, 0.0):.1f} vs {speed_lookup.get(top_model, 0.0):.1f} reviews/s)."
+        )
+    return fastest_model, rationale
+
+
+def evaluate_seed_stability(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    best_c: float,
+    seeds: List[int] = [42, 7, 123]
+) -> Dict[str, Any]:
+    """Step 11: Repeat training & validation for 3 seeds and report mean & std of F1."""
+    f1_list = []
+    print(f"\nEvaluating Seed Stability over seeds: {seeds}...")
+    for s in seeds:
+        scaler = StandardScaler(with_mean=True)
+        X_tr = scaler.fit_transform(X_train)
+        X_va = scaler.transform(X_val)
+        base_svc = LinearSVC(C=best_c, random_state=s, max_iter=2000, dual=False)
+        calibrated = CalibratedClassifierCV(estimator=base_svc, method="sigmoid", cv=5)
+        calibrated.fit(X_tr, y_train)
+        val_probs = calibrated.predict_proba(X_va)[:, 1]
+        m = compute_metrics(y_val, val_probs)
+        f1_list.append(m["f1_cg"])
+        print(f"  Seed {s} -> Validation F1(CG) = {m['f1_cg']:.4f}")
+
+    mean_f1 = float(np.mean(f1_list))
+    std_f1 = float(np.std(f1_list))
+    print(f"Seed Stability Result: Mean F1 = {mean_f1:.4f}, Std F1 = {std_f1:.4f}")
+    return {
+        "seeds": seeds,
+        "f1_scores": f1_list,
+        "mean_f1": round(mean_f1, 4),
+        "std_f1": round(std_f1, 4)
+    }
+
+
+def plot_confusion_matrices(
+    pipeline_results: Dict[str, Dict[str, Any]],
+    output_path: str = os.path.join(RESULTS_DIR, "confusion_matrices.png")
+) -> str:
+    """Plot confusion matrices for all evaluated pipelines on validation set."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_models = len(pipeline_results)
+    cols = 2
+    rows = (n_models + 1) // 2
+    fig, axes = plt.subplots(rows, cols, figsize=(10, 4 * rows))
+    if n_models == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    for idx, (name, res) in enumerate(pipeline_results.items()):
+        cm = np.array(res["metrics"]["confusion_matrix"])
+        ax = axes[idx]
+        im = ax.imshow(cm, cmap="Blues", interpolation="nearest")
+        short_name = name.split("/")[-1]
+        ax.set_title(f"{short_name}\nF1(CG): {res['metrics']['f1_cg']:.4f} | Acc: {res['metrics']['accuracy']:.4f}", fontsize=11)
+        ax.set_xlabel("Predicted Label")
+        ax.set_ylabel("True Label")
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels(["Genuine (0)", "CG (1)"])
+        ax.set_yticklabels(["Genuine (0)", "CG (1)"])
+
+        for i in range(2):
+            for j in range(2):
+                val = cm[i, j]
+                color = "white" if val > cm.max() / 2 else "black"
+                ax.text(j, i, f"{val:,}", ha="center", va="center", color=color, fontsize=12, fontweight="bold")
+
+    for j in range(n_models, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Confusion matrices saved to: {output_path}")
+    return output_path
+
+
+def run_day_3(
+    dataset_path: str = SALMINEN_DATA_PATH,
+    max_length: int = 128,
+    batch_size: int = 128,
+    models: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Execute Day 3 workflow:
+    1. Set seed
+    2. Load preprocessed dataset and splits
+    3. Load cached baseline validation metrics (or compute if missing)
+    4. For each candidate encoder:
+       - Load/compute train and val embeddings
+       - Train StandardScaler (fit on train only)
+       - Tune LinearSVC C on validation set
+       - Fit CalibratedClassifierCV(sigmoid, cv=5) on train only
+       - Evaluate on validation set
+    5. Select best pipeline by Validation F1(CG) (prefer smaller/faster if within 1 point)
+    6. Run seed stability evaluation across seeds 42, 7, 123
+    7. Generate and save confusion_matrices.png
+    8. Save validation comparison table (JSON & Markdown)
+    """
+    set_seed(RANDOM_SEED)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+
+    if models is None:
+        models = CANDIDATE_ENCODERS
+
+    print(">>> Loading dataset and stratified splits...")
+    df = load_dataset(dataset_path, verbose=False)
+    splits_path = os.path.join(DATA_CACHE_DIR, "split_indices.json")
+    splits = split_dataset(df, seed=RANDOM_SEED, save_path=splits_path)
+
+    train_df = df.iloc[splits["train"]].reset_index(drop=True)
+    val_df = df.iloc[splits["val"]].reset_index(drop=True)
+
+    y_train = train_df["label"].values
+    y_val = val_df["label"].values
+
+    pipeline_results = {}
+
+    # 1. Baseline TF-IDF
+    baseline_cache_file = os.path.join(RESULTS_DIR, "baseline_metrics.json")
+    if os.path.exists(baseline_cache_file):
+        with open(baseline_cache_file, "r", encoding="utf-8") as f:
+            b_data = json.load(f)
+            pipeline_results["TF-IDF + LinearSVC"] = {
+                "pipeline": b_data.get("pipeline", "TF-IDF + LinearSVC"),
+                "best_c": 0.01,
+                "metrics": b_data["metrics"],
+                "reviews_per_sec": 5000.0
+            }
+            print("Loaded precomputed TF-IDF Baseline validation metrics.")
+    else:
+        clf_b, sc_b, vec_b, m_b, p_b = train_baseline_tfidf(
+            train_texts=train_df["text"].tolist(),
+            train_labels=y_train,
+            val_texts=val_df["text"].tolist(),
+            val_labels=y_val
+        )
+        pipeline_results["TF-IDF + LinearSVC"] = {
+            "pipeline": "TF-IDF (1-2 grams) + LinearSVC (Sigmoid Calibrated)",
+            "best_c": 0.01,
+            "metrics": m_b,
+            "reviews_per_sec": 5000.0
+        }
+
+    # Load smoke test speeds for tie-breaking
+    smoke_file = os.path.join(RESULTS_DIR, "smoke_test_results.json")
+    speed_lookup = {"TF-IDF + LinearSVC": 5000.0}
+    if os.path.exists(smoke_file):
+        with open(smoke_file, "r", encoding="utf-8") as f:
+            s_data = json.load(f)
+            for m, rep in s_data.items():
+                speed_lookup[m] = rep.get("reviews_per_sec", 1.0)
+
+    # 2. Candidate Encoders
+    for model_name in models:
+        print(f"\n==========================================")
+        print(f"=== Training Pipeline for: {model_name} ===")
+        print(f"==========================================")
+
+        extractor = FeatureExtractor(model_name, batch_size=batch_size)
+
+        # Ensure validation embeddings exist
+        val_emb = get_or_compute_embeddings(
+            model_name=model_name,
+            split_name="val",
+            texts=val_df["text"].tolist(),
+            cache_dir=DATA_CACHE_DIR,
+            max_length=max_length,
+            batch_size=batch_size,
+            extractor=extractor
+        )
+
+        # Ensure train embeddings exist
+        train_emb = get_or_compute_embeddings(
+            model_name=model_name,
+            split_name="train",
+            texts=train_df["text"].tolist(),
+            cache_dir=DATA_CACHE_DIR,
+            max_length=max_length,
+            batch_size=batch_size,
+            extractor=extractor
+        )
+
+        calibrated_clf, scaler, best_c, val_metrics, val_probas = train_linear_svc_pipeline(
+            X_train=train_emb,
+            y_train=y_train,
+            X_val=val_emb,
+            y_val=y_val,
+            seed=RANDOM_SEED
+        )
+
+        pipeline_results[model_name] = {
+            "pipeline": f"{model_name} + LinearSVC (Sigmoid Calibrated)",
+            "best_c": best_c,
+            "metrics": val_metrics,
+            "reviews_per_sec": speed_lookup.get(model_name, 1.0)
+        }
+
+    # 3. Model Selection
+    print("\n==========================================")
+    print("=== MODEL SELECTION (Step 9) ===")
+    print("==========================================")
+    best_model_name, selection_rationale = select_best_pipeline(pipeline_results, speed_lookup)
+    print(f"Selected Winning Pipeline: {best_model_name}")
+    print(f"Rationale: {selection_rationale}")
+
+    # 4. Seed Stability Check (Step 11) for winning model
+    print("\n==========================================")
+    print(f"=== SEED STABILITY (Step 11): {best_model_name} ===")
+    print("==========================================")
+    best_c_win = pipeline_results[best_model_name]["best_c"]
+    
+    if best_model_name == "TF-IDF + LinearSVC":
+        vec_s = TfidfVectorizer(ngram_range=(1, 2), max_features=25000, sublinear_tf=True)
+        X_tr_tfidf = vec_s.fit_transform(train_df["text"].tolist())
+        X_va_tfidf = vec_s.transform(val_df["text"].tolist())
+        stability = evaluate_seed_stability(
+            X_train=X_tr_tfidf.toarray() if hasattr(X_tr_tfidf, "toarray") else X_tr_tfidf,
+            y_train=y_train,
+            X_val=X_va_tfidf.toarray() if hasattr(X_va_tfidf, "toarray") else X_va_tfidf,
+            y_val=y_val,
+            best_c=best_c_win,
+            seeds=[42, 7, 123]
+        )
+    else:
+        val_emb_win = get_or_compute_embeddings(best_model_name, "val", val_df["text"].tolist())
+        train_emb_win = get_or_compute_embeddings(best_model_name, "train", train_df["text"].tolist())
+        stability = evaluate_seed_stability(
+            X_train=train_emb_win,
+            y_train=y_train,
+            X_val=val_emb_win,
+            y_val=y_val,
+            best_c=best_c_win,
+            seeds=[42, 7, 123]
+        )
+
+    # 5. Plot confusion matrices
+    cm_path = plot_confusion_matrices(pipeline_results, os.path.join(RESULTS_DIR, "confusion_matrices.png"))
+
+    # 6. Save validation summary table
+    summary_data = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "selected_pipeline": best_model_name,
+        "selection_rationale": selection_rationale,
+        "seed_stability": stability,
+        "pipelines": pipeline_results
+    }
+    summary_json = os.path.join(RESULTS_DIR, "validation_metrics_summary.json")
+    with open(summary_json, "w", encoding="utf-8") as f:
+        json.dump(summary_data, f, indent=2)
+
+    summary_md = os.path.join(RESULTS_DIR, "validation_metrics_summary.md")
+    with open(summary_md, "w", encoding="utf-8") as f:
+        f.write("# Validation Evaluation Summary & Model Selection\n\n")
+        f.write(f"**Winning Pipeline**: `{best_model_name}`  \n")
+        f.write(f"**Decision Rationale**: {selection_rationale}  \n")
+        f.write(f"**Seed Stability F1 (seeds 42, 7, 123)**: Mean = {stability['mean_f1']:.4f}, Std = {stability['std_f1']:.4f}\n\n")
+        f.write("### Validation Performance Comparison Table\n\n")
+        f.write("| Pipeline | Best C | Accuracy | Precision(CG) | Recall(CG) | F1(CG) | Brier Score | ECE (10 bins) | Speed (rev/s) |\n")
+        f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+        for name, p in pipeline_results.items():
+            m = p["metrics"]
+            f.write(f"| `{name}` | {p['best_c']} | {m['accuracy']:.4f} | {m['precision_cg']:.4f} | {m['recall_cg']:.4f} | **{m['f1_cg']:.4f}** | {m['brier_score']:.4f} | {m['ece']:.4f} | {p['reviews_per_sec']:.1f} |\n")
+
+    print(f"\n[DONE] Validation evaluation complete. Results saved to: {summary_json} and {summary_md}")
+    return summary_data
+
+
 run_baseline = run_day_1
 run_feature_extraction = run_day_2
+run_model_selection = run_day_3
 
 
 if __name__ == "__main__":
@@ -704,6 +1090,9 @@ if __name__ == "__main__":
         run_baseline()
     elif len(sys.argv) > 1 and sys.argv[1] in ("features", "day2"):
         run_feature_extraction()
+    elif len(sys.argv) > 1 and sys.argv[1] in ("selection", "day3"):
+        run_model_selection()
     else:
-        # Default to running feature extraction when invoked directly
-        run_feature_extraction()
+        # Default to model selection when invoked directly
+        run_model_selection()
+

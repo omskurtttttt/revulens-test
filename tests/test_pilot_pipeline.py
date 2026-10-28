@@ -3,7 +3,6 @@ import pytest
 import pandas as pd
 import numpy as np
 
-# We will import from pilot once implemented
 from pilot import (
     normalize_text,
     load_dataset,
@@ -13,6 +12,10 @@ from pilot import (
     mean_pooling,
     FeatureExtractor,
     get_or_compute_embeddings,
+    train_linear_svc_pipeline,
+    select_best_pipeline,
+    evaluate_seed_stability,
+    plot_confusion_matrices,
 )
 
 def test_normalize_text():
@@ -186,3 +189,83 @@ def test_get_or_compute_embeddings(tmp_path):
         batch_size=2
     )
     assert np.array_equal(emb1, emb2)
+
+
+def test_train_linear_svc_pipeline():
+    np.random.seed(42)
+    # 100 samples, dim 16
+    X_train = np.random.randn(100, 16)
+    y_train = (X_train[:, 0] > 0).astype(int)
+    X_val = np.random.randn(30, 16)
+    y_val = (X_val[:, 0] > 0).astype(int)
+
+    clf, scaler, best_c, metrics, probs = train_linear_svc_pipeline(
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        c_grid=[0.01, 0.1, 1.0],
+        seed=42
+    )
+    assert best_c in [0.01, 0.1, 1.0]
+    assert 0.0 <= metrics["accuracy"] <= 1.0
+    assert 0.0 <= metrics["f1_cg"] <= 1.0
+    assert 0.0 <= metrics["brier_score"] <= 1.0
+    assert 0.0 <= metrics["ece"] <= 1.0
+    assert len(probs) == 30
+    assert np.all((probs >= 0.0) & (probs <= 1.0))
+
+
+def test_select_best_pipeline_highest_f1():
+    results = {
+        "ModelA": {"metrics": {"f1_cg": 0.95}},
+        "ModelB": {"metrics": {"f1_cg": 0.90}},
+    }
+    speeds = {"ModelA": 10.0, "ModelB": 20.0}
+    winner, rationale = select_best_pipeline(results, speeds)
+    assert winner == "ModelA"
+    assert "highest Validation F1(CG)" in rationale
+
+
+def test_select_best_pipeline_speed_tiebreak():
+    # ModelB is within 0.01 of ModelA (0.945 vs 0.950), but ModelB is much faster
+    results = {
+        "ModelA": {"metrics": {"f1_cg": 0.950}},
+        "ModelB": {"metrics": {"f1_cg": 0.945}},
+    }
+    speeds = {"ModelA": 7.0, "ModelB": 15.0}
+    winner, rationale = select_best_pipeline(results, speeds)
+    assert winner == "ModelB"
+    assert "faster/smaller" in rationale
+
+
+def test_evaluate_seed_stability():
+    np.random.seed(42)
+    X_train = np.random.randn(80, 16)
+    y_train = (X_train[:, 0] > 0).astype(int)
+    X_val = np.random.randn(20, 16)
+    y_val = (X_val[:, 0] > 0).astype(int)
+
+    stability = evaluate_seed_stability(
+        X_train=X_train,
+        y_train=y_train,
+        X_val=X_val,
+        y_val=y_val,
+        best_c=1.0,
+        seeds=[42, 7, 123]
+    )
+    assert "mean_f1" in stability
+    assert "std_f1" in stability
+    assert len(stability["f1_scores"]) == 3
+    assert stability["std_f1"] >= 0.0
+
+
+def test_plot_confusion_matrices(tmp_path):
+    mock_results = {
+        "Baseline": {"metrics": {"f1_cg": 0.93, "accuracy": 0.93, "confusion_matrix": [[1888, 133], [143, 1875]]}},
+        "DistilBERT": {"metrics": {"f1_cg": 0.94, "accuracy": 0.94, "confusion_matrix": [[1900, 121], [130, 1888]]}},
+    }
+    out_file = str(tmp_path / "test_cm.png")
+    saved_path = plot_confusion_matrices(mock_results, output_path=out_file)
+    assert os.path.exists(saved_path)
+    assert os.path.getsize(saved_path) > 1000
