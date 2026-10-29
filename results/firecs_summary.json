@@ -1,0 +1,51 @@
+{
+  "timestamp": "2026-10-29T03:44:08Z",
+  "selected_model": "distilbert-base-multilingual-cased",
+  "total_reviews": 10481,
+  "results": {
+    "TF-IDF + LinearSVC": {
+      "total_reviews": 10481,
+      "predicted_cg_count": 1118,
+      "predicted_genuine_count": 9363,
+      "false_alarm_rate_percent": 10.67,
+      "presumed_genuine_rate_percent": 89.33,
+      "mean_confidence": 0.8539,
+      "std_confidence": 0.1425,
+      "median_confidence": 0.9065,
+      "q25_confidence": 0.7636,
+      "q75_confidence": 0.9732,
+      "min_confidence": 0.5002,
+      "max_confidence": 1.0,
+      "confidence_buckets": {
+        "high_gte_80_percent": 7333,
+        "moderate_60_to_80_percent": 2201,
+        "low_50_to_60_percent": 947
+      }
+    },
+    "distilbert-base-multilingual-cased": {
+      "total_reviews": 10481,
+      "predicted_cg_count": 6760,
+      "predicted_genuine_count": 3721,
+      "false_alarm_rate_percent": 64.5,
+      "presumed_genuine_rate_percent": 35.5,
+      "mean_confidence": 0.8831,
+      "std_confidence": 0.1453,
+      "median_confidence": 0.9585,
+      "q25_confidence": 0.7992,
+      "q75_confidence": 0.9964,
+      "min_confidence": 0.5001,
+      "max_confidence": 1.0,
+      "confidence_buckets": {
+        "high_gte_80_percent": 7851,
+        "moderate_60_to_80_percent": 1828,
+        "low_50_to_60_percent": 802
+      }
+    }
+  },
+  "caveats": [
+    "FiReCS has NO ground-truth Genuine vs CG labels; it is treated strictly as presumed-genuine.",
+    "Accuracy, precision, recall, and F1 CANNOT be computed on FiReCS.",
+    "Both models were trained strictly on English reviews (Salminen et al.).",
+    "An elevated false-alarm (CG) rate on Taglish/Filipino is expected due to cross-lingual domain shift and does not indicate model invalidity on English reviews."
+  ]
+}

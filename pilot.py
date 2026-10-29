@@ -1392,6 +1392,312 @@ def run_day_4(
 run_test_and_reliability = run_day_4
 
 
+def load_firecs_dataset(
+    train_path: str = FIRECS_TRAIN_PATH,
+    test_path: str = FIRECS_TEST_PATH,
+    verbose: bool = True
+) -> pd.DataFrame:
+    """Load and normalize FiReCS (Filipino/Taglish) review datasets.
+    
+    Strict Guardrails (GEMINI.md Step 12):
+    - FiReCS has NO Genuine/CG labels. Never train or compute accuracy on it.
+    - Used only as a presumed-genuine, out-of-domain false alarm check.
+    - Preserves stop words, normalizes text (HTML, URLs, lowercase, punctuation).
+    """
+    dfs = []
+    for path, source_split in [(train_path, "train"), (test_path, "test")]:
+        if os.path.exists(path):
+            d = pd.read_csv(path)
+            if "review" in d.columns:
+                text_col = "review"
+            elif "text" in d.columns:
+                text_col = "text"
+            else:
+                raise ValueError(f"No review/text column found in {path}: {d.columns.tolist()}")
+            d = d[[text_col]].copy()
+            d.rename(columns={text_col: "raw_text"}, inplace=True)
+            d["source_split"] = source_split
+            dfs.append(d)
+        else:
+            print(f"Warning: FiReCS split not found at {path}")
+
+    if not dfs:
+        raise FileNotFoundError(f"Neither FiReCS train ({train_path}) nor test ({test_path}) was found.")
+
+    df = pd.concat(dfs, ignore_index=True)
+    initial_count = len(df)
+
+    # Normalize text
+    df["clean_text"] = df["raw_text"].apply(normalize_text)
+
+    # Drop empty reviews
+    empty_mask = df["clean_text"].str.strip() == ""
+    if empty_mask.any():
+        df = df[~empty_mask]
+
+    # Deduplicate on clean text
+    df = df.drop_duplicates(subset=["clean_text"], keep="first").reset_index(drop=True)
+
+    df["language"] = "Filipino/Taglish"
+    df["word_count"] = df["clean_text"].str.split().str.len()
+    df["char_length"] = df["clean_text"].str.len()
+
+    if verbose:
+        print(f"Loaded FiReCS dataset: {len(df)} unique reviews (dropped {initial_count - len(df)} empty/duplicates)")
+        print(f"Word count: mean={df['word_count'].mean():.1f}, min={df['word_count'].min()}, max={df['word_count'].max()}")
+
+    return df
+
+
+def compute_confidence_distribution(probas_cg: np.ndarray, threshold: float = 0.50) -> Dict[str, Any]:
+    """Compute confidence distribution and false-alarm metrics on presumed-genuine text.
+    
+    Rule from GEMINI.md:
+    Confidence = max(P(CG), 1 - P(CG)), threshold fixed at 0.50.
+    """
+    probas_cg = np.asarray(probas_cg, dtype=float)
+    confidences = np.maximum(probas_cg, 1.0 - probas_cg)
+    preds_cg = (probas_cg >= threshold).astype(int)
+
+    total = len(probas_cg)
+    if total == 0:
+        return {}
+
+    cg_count = int(np.sum(preds_cg == 1))
+    genuine_count = total - cg_count
+    cg_rate = float(cg_count / total * 100.0)
+    genuine_rate = float(genuine_count / total * 100.0)
+
+    return {
+        "total_reviews": total,
+        "predicted_cg_count": cg_count,
+        "predicted_genuine_count": genuine_count,
+        "false_alarm_rate_percent": round(cg_rate, 2),
+        "presumed_genuine_rate_percent": round(genuine_rate, 2),
+        "mean_confidence": round(float(np.mean(confidences)), 4),
+        "std_confidence": round(float(np.std(confidences)), 4),
+        "median_confidence": round(float(np.median(confidences)), 4),
+        "q25_confidence": round(float(np.percentile(confidences, 25)), 4),
+        "q75_confidence": round(float(np.percentile(confidences, 75)), 4),
+        "min_confidence": round(float(np.min(confidences)), 4),
+        "max_confidence": round(float(np.max(confidences)), 4),
+        "confidence_buckets": {
+            "high_gte_80_percent": int(np.sum(confidences >= 0.80)),
+            "moderate_60_to_80_percent": int(np.sum((confidences >= 0.60) & (confidences < 0.80))),
+            "low_50_to_60_percent": int(np.sum((confidences >= 0.50) & (confidences < 0.60)))
+        }
+    }
+
+
+def evaluate_firecs_pipeline(
+    calibrated_clf: Any,
+    scaler: Any,
+    X_features: np.ndarray
+) -> Tuple[Dict[str, Any], np.ndarray, np.ndarray]:
+    """Evaluate fitted pipeline on FiReCS features.
+    
+    Strict Guardrails:
+    - Scaler calls .transform only.
+    - Returns (distribution_metrics, probas_cg, confidences).
+    """
+    X_scaled = scaler.transform(X_features)
+    probas_cg = calibrated_clf.predict_proba(X_scaled)[:, 1]
+    confidences = np.maximum(probas_cg, 1.0 - probas_cg)
+    metrics = compute_confidence_distribution(probas_cg)
+    return metrics, probas_cg, confidences
+
+
+def run_day_5(
+    salminen_path: str = SALMINEN_DATA_PATH,
+    firecs_train_path: str = FIRECS_TRAIN_PATH,
+    firecs_test_path: str = FIRECS_TEST_PATH,
+    selected_model: str = "distilbert-base-multilingual-cased",
+    max_length: int = 128,
+    batch_size: int = 128
+) -> Dict[str, Any]:
+    """Execute Day 5 workflow (Step 12):
+    1. Set seed
+    2. Load Salminen dataset and splits to train baseline & winning model on Salminen train only
+    3. Load FiReCS dataset (unlabeled Filipino/Taglish reviews)
+    4. Run TF-IDF baseline on FiReCS texts and measure false-alarm rate & confidence distribution
+    5. Extract and cache FiReCS embeddings for selected pipeline (distilbert)
+    6. Run selected pipeline on FiReCS embeddings and measure false-alarm rate & confidence distribution
+    7. Save results/firecs_check.csv (review-level predictions)
+    8. Save results/firecs_summary.json and results/firecs_summary.md with mandatory caveats
+    """
+    set_seed(RANDOM_SEED)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+
+    print(">>> Day 5: Step 12 FiReCS Out-of-Domain False Alarm Check...")
+
+    # 1. Load Salminen Train set to fit classifiers (fit on train only!)
+    salminen_df = load_dataset(salminen_path, verbose=False)
+    splits_path = os.path.join(DATA_CACHE_DIR, "split_indices.json")
+    splits = split_dataset(salminen_df, seed=RANDOM_SEED, save_path=splits_path)
+
+    train_salminen = salminen_df.iloc[splits["train"]].reset_index(drop=True)
+    val_salminen = salminen_df.iloc[splits["val"]].reset_index(drop=True)
+
+    y_train = train_salminen["label"].values
+    y_val = val_salminen["label"].values
+
+    # 2. Load FiReCS Dataset
+    firecs_df = load_firecs_dataset(firecs_train_path, firecs_test_path, verbose=True)
+    firecs_texts = firecs_df["clean_text"].tolist()
+    total_firecs = len(firecs_texts)
+
+    # 3. Baseline TF-IDF on FiReCS
+    print("\n==========================================")
+    print("=== BASELINE TF-IDF ON FIRECS (Step 12) ===")
+    print("==========================================")
+    clf_base, sc_base, vec_base, _, _ = train_baseline_tfidf(
+        train_texts=train_salminen["text"].tolist(),
+        train_labels=y_train,
+        val_texts=val_salminen["text"].tolist(),
+        val_labels=y_val
+    )
+    X_firecs_tfidf = vec_base.transform(firecs_texts)
+    metrics_base, probas_base, confs_base = evaluate_firecs_pipeline(
+        calibrated_clf=clf_base,
+        scaler=sc_base,
+        X_features=X_firecs_tfidf
+    )
+    print(f"TF-IDF FiReCS Results:")
+    print(f"  False Alarm Rate: {metrics_base['false_alarm_rate_percent']}% ({metrics_base['predicted_cg_count']}/{total_firecs})")
+    print(f"  Presumed Genuine: {metrics_base['presumed_genuine_rate_percent']}% ({metrics_base['predicted_genuine_count']}/{total_firecs})")
+    print(f"  Mean Confidence:  {metrics_base['mean_confidence'] * 100:.2f}%")
+    print(f"  Median Confidence:{metrics_base['median_confidence'] * 100:.2f}%")
+
+    # 4. Selected Pipeline (DistilBERT) on FiReCS
+    print("\n==========================================")
+    print(f"=== SELECTED PIPELINE ON FIRECS: {selected_model} ===")
+    print("==========================================")
+    extractor = FeatureExtractor(selected_model, batch_size=batch_size)
+
+    # Train embeddings from cache
+    train_emb = get_or_compute_embeddings(
+        model_name=selected_model,
+        split_name="train",
+        texts=train_salminen["text"].tolist(),
+        cache_dir=DATA_CACHE_DIR,
+        max_length=max_length,
+        batch_size=batch_size,
+        extractor=extractor
+    )
+    val_emb = get_or_compute_embeddings(
+        model_name=selected_model,
+        split_name="val",
+        texts=val_salminen["text"].tolist(),
+        cache_dir=DATA_CACHE_DIR,
+        max_length=max_length,
+        batch_size=batch_size,
+        extractor=extractor
+    )
+
+    clf_win, sc_win, best_c_win, _, _ = train_linear_svc_pipeline(
+        X_train=train_emb,
+        y_train=y_train,
+        X_val=val_emb,
+        y_val=y_val,
+        c_grid=[0.5],
+        seed=RANDOM_SEED
+    )
+
+    # Extract/cache FiReCS embeddings
+    firecs_emb = get_or_compute_embeddings(
+        model_name=selected_model,
+        split_name="firecs",
+        texts=firecs_texts,
+        cache_dir=DATA_CACHE_DIR,
+        max_length=max_length,
+        batch_size=batch_size,
+        extractor=extractor
+    )
+
+    metrics_win, probas_win, confs_win = evaluate_firecs_pipeline(
+        calibrated_clf=clf_win,
+        scaler=sc_win,
+        X_features=firecs_emb
+    )
+    print(f"\n{selected_model} FiReCS Results:")
+    print(f"  False Alarm Rate: {metrics_win['false_alarm_rate_percent']}% ({metrics_win['predicted_cg_count']}/{total_firecs})")
+    print(f"  Presumed Genuine: {metrics_win['presumed_genuine_rate_percent']}% ({metrics_win['predicted_genuine_count']}/{total_firecs})")
+    print(f"  Mean Confidence:  {metrics_win['mean_confidence'] * 100:.2f}%")
+    print(f"  Median Confidence:{metrics_win['median_confidence'] * 100:.2f}%")
+
+    # 5. Save results/firecs_check.csv (Step 12 required artifact)
+    output_df = pd.DataFrame({
+        "clean_text": firecs_texts,
+        "word_count": firecs_df["word_count"],
+        "source_split": firecs_df["source_split"],
+        "distilbert_prob_cg": np.round(probas_win, 4),
+        "distilbert_pred_cg": (probas_win >= 0.50).astype(int),
+        "distilbert_confidence": np.round(confs_win, 4),
+        "tfidf_prob_cg": np.round(probas_base, 4),
+        "tfidf_pred_cg": (probas_base >= 0.50).astype(int),
+        "tfidf_confidence": np.round(confs_base, 4)
+    })
+    firecs_csv_path = os.path.join(RESULTS_DIR, "firecs_check.csv")
+    output_df.to_csv(firecs_csv_path, index=False, encoding="utf-8")
+    print(f"\nSaved detailed predictions for {len(output_df)} reviews to: {firecs_csv_path}")
+
+    # 6. Save results/firecs_summary.json and results/firecs_summary.md
+    summary_data = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "selected_model": selected_model,
+        "total_reviews": total_firecs,
+        "results": {
+            "TF-IDF + LinearSVC": metrics_base,
+            selected_model: metrics_win
+        },
+        "caveats": [
+            "FiReCS has NO ground-truth Genuine vs CG labels; it is treated strictly as presumed-genuine.",
+            "Accuracy, precision, recall, and F1 CANNOT be computed on FiReCS.",
+            "Both models were trained strictly on English reviews (Salminen et al.).",
+            "An elevated false-alarm (CG) rate on Taglish/Filipino is expected due to cross-lingual domain shift and does not indicate model invalidity on English reviews."
+        ]
+    }
+
+    summary_json_path = os.path.join(RESULTS_DIR, "firecs_summary.json")
+    with open(summary_json_path, "w", encoding="utf-8") as f:
+        json.dump(summary_data, f, indent=2)
+
+    summary_md_path = os.path.join(RESULTS_DIR, "firecs_summary.md")
+    with open(summary_md_path, "w", encoding="utf-8") as f:
+        f.write("# FiReCS Out-of-Domain False Alarm Analysis (Step 12)\n\n")
+        f.write("### Presumed-Genuine Evaluation on Filipino / Taglish Reviews\n\n")
+        f.write(f"- **Total FiReCS Reviews Analyzed**: {total_firecs:,} unique reviews\n")
+        f.write(f"- **Selected Pipeline**: `{selected_model}`\n")
+        f.write(f"- **Baseline Pipeline**: `TF-IDF + LinearSVC`\n\n")
+        f.write("### False Alarm & Confidence Summary\n\n")
+        f.write("| Metric | `TF-IDF + LinearSVC` | `distilbert-base-multilingual-cased` |\n")
+        f.write("| :--- | :---: | :---: |\n")
+        f.write(f"| **Predicted CG Count (False Alarms)** | {metrics_base['predicted_cg_count']:,} | **{metrics_win['predicted_cg_count']:,}** |\n")
+        f.write(f"| **False Alarm Rate (%)** | {metrics_base['false_alarm_rate_percent']}% | **{metrics_win['false_alarm_rate_percent']}%** |\n")
+        f.write(f"| **Presumed Genuine Rate (%)** | {metrics_base['presumed_genuine_rate_percent']}% | **{metrics_win['presumed_genuine_rate_percent']}%** |\n")
+        f.write(f"| **Mean Confidence** | {metrics_base['mean_confidence'] * 100:.2f}% | **{metrics_win['mean_confidence'] * 100:.2f}%** |\n")
+        f.write(f"| **Median Confidence** | {metrics_base['median_confidence'] * 100:.2f}% | **{metrics_win['median_confidence'] * 100:.2f}%** |\n")
+        f.write(f"| **Confidence IQR (Q25 - Q75)** | {metrics_base['q25_confidence']*100:.1f}% - {metrics_base['q75_confidence']*100:.1f}% | **{metrics_win['q25_confidence']*100:.1f}% - {metrics_win['q75_confidence']*100:.1f}%** |\n\n")
+
+        f.write("### Confidence Buckets\n\n")
+        f.write("| Confidence Bucket | `TF-IDF + LinearSVC` | `distilbert-base-multilingual-cased` |\n")
+        f.write("| :--- | :---: | :---: |\n")
+        f.write(f"| High Confidence (≥ 80%) | {metrics_base['confidence_buckets']['high_gte_80_percent']:,} ({metrics_base['confidence_buckets']['high_gte_80_percent']/total_firecs*100:.1f}%) | {metrics_win['confidence_buckets']['high_gte_80_percent']:,} ({metrics_win['confidence_buckets']['high_gte_80_percent']/total_firecs*100:.1f}%) |\n")
+        f.write(f"| Moderate Confidence (60% - 80%) | {metrics_base['confidence_buckets']['moderate_60_to_80_percent']:,} ({metrics_base['confidence_buckets']['moderate_60_to_80_percent']/total_firecs*100:.1f}%) | {metrics_win['confidence_buckets']['moderate_60_to_80_percent']:,} ({metrics_win['confidence_buckets']['moderate_60_to_80_percent']/total_firecs*100:.1f}%) |\n")
+        f.write(f"| Low / Borderline Confidence (50% - 60%) | {metrics_base['confidence_buckets']['low_50_to_60_percent']:,} ({metrics_base['confidence_buckets']['low_50_to_60_percent']/total_firecs*100:.1f}%) | {metrics_win['confidence_buckets']['low_50_to_60_percent']:,} ({metrics_win['confidence_buckets']['low_50_to_60_percent']/total_firecs*100:.1f}%) |\n\n")
+
+        f.write("### Methodological Caveats (Required by GEMINI.md)\n\n")
+        for caveat in summary_data["caveats"]:
+            f.write(f"> [!IMPORTANT]\n> {caveat}\n\n")
+
+    print(f"\n[DONE] FiReCS false alarm check complete. Summary saved to {summary_json_path} and {summary_md_path}")
+    return summary_data
+
+
+run_firecs_check = run_day_5
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] in ("baseline", "day1"):
@@ -1402,7 +1708,9 @@ if __name__ == "__main__":
         run_model_selection()
     elif len(sys.argv) > 1 and sys.argv[1] in ("test", "day4"):
         run_test_and_reliability()
+    elif len(sys.argv) > 1 and sys.argv[1] in ("firecs", "day5"):
+        run_firecs_check()
     else:
-        # Default to model selection when invoked directly
-        run_model_selection()
+        # Default to FiReCS check when invoked directly in Day 5
+        run_firecs_check()
 

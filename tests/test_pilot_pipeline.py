@@ -19,6 +19,9 @@ from pilot import (
     evaluate_test_set,
     evaluate_baseline_test_set,
     plot_reliability_diagram,
+    load_firecs_dataset,
+    compute_confidence_distribution,
+    evaluate_firecs_pipeline,
 )
 
 def test_normalize_text():
@@ -346,3 +349,74 @@ def test_plot_reliability_diagram(tmp_path):
     saved_path = plot_reliability_diagram(mock_data, output_path=out_file, n_bins=5)
     assert os.path.exists(saved_path)
     assert os.path.getsize(saved_path) > 1000
+
+
+def test_load_firecs_dataset(tmp_path):
+    train_file = tmp_path / "mock_firecs_train.csv"
+    test_file = tmp_path / "mock_firecs_test.csv"
+
+    pd.DataFrame({
+        "review": ["Salamat sa item napakaganda <br/> www.shop.com", "Mabilis dumating"],
+        "label": [1.0, 0.0]  # Sentiment labels, not genuine/CG!
+    }).to_csv(train_file, index=False)
+
+    pd.DataFrame({
+        "review": ["Mabilis dumating", "Sira agad pagkabukas"],  # Contains 1 duplicate across splits
+        "label": [0.0, 1.0]
+    }).to_csv(test_file, index=False)
+
+    df = load_firecs_dataset(str(train_file), str(test_file), verbose=False)
+    # 4 rows raw -> 1 duplicate -> 3 unique rows
+    assert len(df) == 3
+    assert "clean_text" in df.columns
+    assert "word_count" in df.columns
+    assert "char_length" in df.columns
+    assert "language" in df.columns
+    assert df["language"].iloc[0] == "Filipino/Taglish"
+    # Ensure text is normalized
+    assert "<br/>" not in df["clean_text"].iloc[0]
+    assert "www.shop.com" not in df["clean_text"].iloc[0]
+    # Ensure raw sentiment label is not mistaken as target label
+    assert "label" not in df.columns
+
+
+def test_compute_confidence_distribution():
+    # 4 predictions: 2 genuine (0.1, 0.4), 2 CG (0.7, 0.9)
+    probas = np.array([0.1, 0.4, 0.7, 0.9])
+    res = compute_confidence_distribution(probas, threshold=0.50)
+
+    assert res["total_reviews"] == 4
+    assert res["predicted_cg_count"] == 2
+    assert res["predicted_genuine_count"] == 2
+    assert res["false_alarm_rate_percent"] == 50.0
+    assert res["presumed_genuine_rate_percent"] == 50.0
+    # Confidences: [0.9, 0.6, 0.7, 0.9] -> mean = 3.1 / 4 = 0.775
+    assert np.isclose(res["mean_confidence"], 0.775, atol=1e-3)
+    assert np.isclose(res["median_confidence"], 0.80, atol=1e-3)
+    assert res["confidence_buckets"]["high_gte_80_percent"] == 2
+    assert res["confidence_buckets"]["moderate_60_to_80_percent"] == 2
+    assert res["confidence_buckets"]["low_50_to_60_percent"] == 0
+
+
+def test_evaluate_firecs_pipeline():
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+
+    np.random.seed(42)
+    X_train = np.random.randn(50, 4)
+    y_train = (X_train[:, 0] > 0).astype(int)
+
+    scaler = StandardScaler().fit(X_train)
+    X_train_sc = scaler.transform(X_train)
+    clf = CalibratedClassifierCV(LinearSVC(dual=False), method="sigmoid", cv=2).fit(X_train_sc, y_train)
+
+    X_firecs = np.random.randn(10, 4)
+    metrics, probas, confs = evaluate_firecs_pipeline(clf, scaler, X_firecs)
+
+    assert metrics["total_reviews"] == 10
+    assert len(probas) == 10
+    assert len(confs) == 10
+    assert np.all((probas >= 0.0) & (probas <= 1.0))
+    assert np.all((confs >= 0.50) & (confs <= 1.0))
+

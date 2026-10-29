@@ -15,6 +15,7 @@ __pycache__/
 
 # Large datasets & raw data (keep repository lightweight)
 *.csv
+!results/*.csv
 data/
 downloads/
 
