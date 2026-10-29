@@ -1,0 +1,83 @@
+{
+  "timestamp": "2026-10-29T10:16:39Z",
+  "single_review_latency": {
+    "TF-IDF + LinearSVC": {
+      "n_runs": 50,
+      "sample_text": "this product arrived on time and was well packaged. the quality exceeded my expectations for the price, works exactly as described.",
+      "word_count": 21,
+      "mean_ms": 5.49,
+      "std_ms": 2.6,
+      "median_ms": 4.38,
+      "p95_ms": 11.18,
+      "min_ms": 3.2,
+      "max_ms": 13.08,
+      "seconds_per_review": 0.00549,
+      "reviews_per_sec": 182.2
+    },
+    "distilbert-base-multilingual-cased": {
+      "n_runs": 50,
+      "sample_text": "this product arrived on time and was well packaged. the quality exceeded my expectations for the price, works exactly as described.",
+      "word_count": 21,
+      "mean_ms": 60.66,
+      "std_ms": 3.83,
+      "median_ms": 61.25,
+      "p95_ms": 65.64,
+      "min_ms": 52.33,
+      "max_ms": 65.99,
+      "seconds_per_review": 0.06066,
+      "reviews_per_sec": 16.5
+    },
+    "xlm-roberta-base": {
+      "n_runs": 50,
+      "sample_text": "this product arrived on time and was well packaged. the quality exceeded my expectations for the price, works exactly as described.",
+      "word_count": 21,
+      "mean_ms": 123.66,
+      "std_ms": 6.52,
+      "median_ms": 123.69,
+      "p95_ms": 133.14,
+      "min_ms": 111.22,
+      "max_ms": 138.67,
+      "seconds_per_review": 0.12366,
+      "reviews_per_sec": 8.1
+    },
+    "jcblaise/roberta-tagalog-base": {
+      "n_runs": 50,
+      "sample_text": "this product arrived on time and was well packaged. the quality exceeded my expectations for the price, works exactly as described.",
+      "word_count": 21,
+      "mean_ms": 137.98,
+      "std_ms": 10.44,
+      "median_ms": 133.8,
+      "p95_ms": 157.1,
+      "min_ms": 122.05,
+      "max_ms": 166.57,
+      "seconds_per_review": 0.13798,
+      "reviews_per_sec": 7.2
+    }
+  },
+  "shap_benchmarks": {
+    "TF-IDF LinearExplainer (100 samples)": {
+      "shap_installed": true,
+      "shap_version": "0.52.0",
+      "explainer_mode": "linear",
+      "background_sample_limit": 100,
+      "seconds_per_review": 0.0404,
+      "latency_ms": 40.39
+    },
+    "DistilBERT Embedding LinearExplainer (100 samples)": {
+      "shap_installed": true,
+      "shap_version": "0.52.0",
+      "explainer_mode": "linear",
+      "background_sample_limit": 100,
+      "seconds_per_review": 0.0181,
+      "latency_ms": 18.06
+    },
+    "DistilBERT KernelExplainer (50 samples)": {
+      "shap_installed": true,
+      "shap_version": "0.52.0",
+      "explainer_mode": "kernel",
+      "background_sample_limit": 50,
+      "seconds_per_review": 0.852,
+      "latency_ms": 851.99
+    }
+  }
+}

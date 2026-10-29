@@ -22,6 +22,8 @@ from pilot import (
     load_firecs_dataset,
     compute_confidence_distribution,
     evaluate_firecs_pipeline,
+    benchmark_single_review_latency,
+    benchmark_shap_latency,
 )
 
 def test_normalize_text():
@@ -419,4 +421,44 @@ def test_evaluate_firecs_pipeline():
     assert len(confs) == 10
     assert np.all((probas >= 0.0) & (probas <= 1.0))
     assert np.all((confs >= 0.50) & (confs <= 1.0))
+
+
+def test_benchmark_single_review_latency_tfidf():
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+
+    corpus = ["great product works well", "terrible broken item", "fast shipping loved it", "waste of money bad"]
+    labels = np.array([0, 1, 0, 1])
+
+    vec = TfidfVectorizer().fit(corpus)
+    sc = StandardScaler(with_mean=False).fit(vec.transform(corpus))
+    clf = CalibratedClassifierCV(LinearSVC(dual=False), method="sigmoid", cv=2).fit(sc.transform(vec.transform(corpus)), labels)
+
+    pipeline_obj = {"vectorizer": vec, "scaler": sc, "clf": clf}
+    res = benchmark_single_review_latency("tfidf", pipeline_obj, test_review="great product works well", n_warmup=2, n_runs=5)
+
+    assert res["n_runs"] == 5
+    assert res["mean_ms"] > 0
+    assert res["median_ms"] > 0
+    assert res["seconds_per_review"] > 0
+    assert res["reviews_per_sec"] > 0
+
+
+def test_benchmark_shap_latency():
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+
+    np.random.seed(42)
+    X = np.random.randn(25, 4)
+    y = (X[:, 0] > 0).astype(int)
+    clf = CalibratedClassifierCV(LinearSVC(dual=False), method="sigmoid", cv=2).fit(X, y)
+
+    res = benchmark_shap_latency(clf, X, X[0], max_samples=10, explainer_mode="linear")
+    assert res["shap_installed"] is True
+    assert res["seconds_per_review"] is not None
+    assert res["seconds_per_review"] >= 0.0
+    assert res["background_sample_limit"] == 10
+
 
