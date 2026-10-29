@@ -22,5 +22,5 @@
 
 ### Browser Extension Recommendations
 
-- **Classification Latency**: `distilbert-base-multilingual-cased` achieves ~30-70ms single review inference on CPU, which is well within the 100ms budget for responsive browser extension UI.
-- **SHAP Explanations**: LinearExplainer on embedding representations completes in **<10 ms**, making feature attribution practically instantaneous for user tooltips. KernelExplainer with 50 samples takes ~1-3s and should only be triggered on explicit user request ('Explain this review' button) rather than auto-rendered for every review on page load.
+- **Classification Latency**: `distilbert-base-multilingual-cased` achieves ~50-65 ms single review inference on CPU (mean 60.66 ms, P95 65.64 ms), which is well within the 100 ms budget for responsive browser extension UI.
+- **SHAP Explanations**: LinearExplainer on embedding representations completes in **18.1 ms** (at 100 samples), while KernelExplainer on embeddings takes **852.0 ms** (at 50 samples). True word-level SHAP using text perturbation takes **349.3 ms** at 25 evaluations and **4.59 s** at 50 evaluations. Feature explanations must therefore only be triggered on-demand via an explicit user click ("Explain this review") rather than automatically executed on page load. See `results/SHAP_NOTE.md` for full architectural analysis.

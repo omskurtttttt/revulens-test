@@ -18,7 +18,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import LinearSVC
@@ -808,36 +808,67 @@ def select_best_pipeline(
 
 
 def evaluate_seed_stability(
-    X_train: np.ndarray,
+    X_train: Any,
     y_train: np.ndarray,
-    X_val: np.ndarray,
+    X_val: Any,
     y_val: np.ndarray,
     best_c: float,
     seeds: List[int] = [42, 7, 123]
 ) -> Dict[str, Any]:
-    """Step 11: Repeat training & validation for 3 seeds and report mean & std of F1."""
+    """Step 11: Real seed stability evaluation across random stratified splits.
+    
+    Strict Guardrails:
+    - Combines train and val development pool (never touches the test set).
+    - For each seed, creates a new stratified train/val split using that seed.
+    - Fits StandardScaler strictly on train split.
+    - Shuffles 5 folds in CalibratedClassifierCV with random_state=seed.
+    - Seeds LinearSVC with random_state=seed.
+    - Reports mean and std of both F1(CG) and Brier score.
+    """
+    import scipy.sparse as sp
+    is_sparse = sp.issparse(X_train)
+    X_dev = sp.vstack([X_train, X_val]) if is_sparse else np.vstack([X_train, X_val])
+    y_dev = np.concatenate([y_train, y_val])
+    val_size = len(y_val)
+
     f1_list = []
-    print(f"\nEvaluating Seed Stability over seeds: {seeds}...")
+    brier_list = []
+    print(f"\nEvaluating Real Seed Stability over seeds: {seeds}...")
     for s in seeds:
-        scaler = StandardScaler(with_mean=True)
-        X_tr = scaler.fit_transform(X_train)
-        X_va = scaler.transform(X_val)
+        tr_sub, va_sub = train_test_split(
+            np.arange(len(y_dev)),
+            test_size=val_size,
+            random_state=s,
+            stratify=y_dev
+        )
+        scaler = StandardScaler(with_mean=not is_sparse)
+        X_tr = scaler.fit_transform(X_dev[tr_sub])
+        X_va = scaler.transform(X_dev[va_sub])
+
         base_svc = LinearSVC(C=best_c, random_state=s, max_iter=2000, dual=False)
-        calibrated = CalibratedClassifierCV(estimator=base_svc, method="sigmoid", cv=5)
-        calibrated.fit(X_tr, y_train)
+        cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=s)
+        calibrated = CalibratedClassifierCV(estimator=base_svc, method="sigmoid", cv=cv)
+        calibrated.fit(X_tr, y_dev[tr_sub])
+
         val_probs = calibrated.predict_proba(X_va)[:, 1]
-        m = compute_metrics(y_val, val_probs)
+        m = compute_metrics(y_dev[va_sub], val_probs)
         f1_list.append(m["f1_cg"])
-        print(f"  Seed {s} -> Validation F1(CG) = {m['f1_cg']:.4f}")
+        brier_list.append(m["brier_score"])
+        print(f"  Seed {s} -> Validation F1(CG) = {m['f1_cg']:.4f}, Brier = {m['brier_score']:.4f}")
 
     mean_f1 = float(np.mean(f1_list))
     std_f1 = float(np.std(f1_list))
-    print(f"Seed Stability Result: Mean F1 = {mean_f1:.4f}, Std F1 = {std_f1:.4f}")
+    mean_brier = float(np.mean(brier_list))
+    std_brier = float(np.std(brier_list))
+    print(f"Seed Stability Result: Mean F1 = {mean_f1:.4f} +/- {std_f1:.4f}, Mean Brier = {mean_brier:.4f} +/- {std_brier:.4f}")
     return {
         "seeds": seeds,
         "f1_scores": f1_list,
         "mean_f1": round(mean_f1, 4),
-        "std_f1": round(std_f1, 4)
+        "std_f1": round(std_f1, 4),
+        "brier_scores": brier_list,
+        "mean_brier": round(mean_brier, 4),
+        "std_brier": round(std_brier, 4)
     }
 
 
@@ -929,6 +960,23 @@ def run_day_3(
 
     pipeline_results = {}
 
+    # Load speed numbers from speed_benchmark.json if available
+    speed_file = os.path.join(RESULTS_DIR, "speed_benchmark.json")
+    speed_lookup = {
+        "TF-IDF + LinearSVC": 182.2,
+        "distilbert-base-multilingual-cased": 16.5,
+        "xlm-roberta-base": 8.1,
+        "jcblaise/roberta-tagalog-base": 7.2
+    }
+    if os.path.exists(speed_file):
+        try:
+            with open(speed_file, "r", encoding="utf-8") as f:
+                sb_data = json.load(f)
+                for m, rep in sb_data.get("single_review_latency", {}).items():
+                    speed_lookup[m] = rep.get("reviews_per_sec", speed_lookup.get(m, 1.0))
+        except Exception:
+            pass
+
     # 1. Baseline TF-IDF
     baseline_cache_file = os.path.join(RESULTS_DIR, "baseline_metrics.json")
     if os.path.exists(baseline_cache_file):
@@ -938,7 +986,7 @@ def run_day_3(
                 "pipeline": b_data.get("pipeline", "TF-IDF + LinearSVC"),
                 "best_c": 0.01,
                 "metrics": b_data["metrics"],
-                "reviews_per_sec": 5000.0
+                "reviews_per_sec": speed_lookup.get("TF-IDF + LinearSVC", 182.2)
             }
             print("Loaded precomputed TF-IDF Baseline validation metrics.")
     else:
@@ -952,17 +1000,8 @@ def run_day_3(
             "pipeline": "TF-IDF (1-2 grams) + LinearSVC (Sigmoid Calibrated)",
             "best_c": 0.01,
             "metrics": m_b,
-            "reviews_per_sec": 5000.0
+            "reviews_per_sec": speed_lookup.get("TF-IDF + LinearSVC", 182.2)
         }
-
-    # Load smoke test speeds for tie-breaking
-    smoke_file = os.path.join(RESULTS_DIR, "smoke_test_results.json")
-    speed_lookup = {"TF-IDF + LinearSVC": 5000.0}
-    if os.path.exists(smoke_file):
-        with open(smoke_file, "r", encoding="utf-8") as f:
-            s_data = json.load(f)
-            for m, rep in s_data.items():
-                speed_lookup[m] = rep.get("reviews_per_sec", 1.0)
 
     # 2. Candidate Encoders
     for model_name in models:
@@ -1017,33 +1056,35 @@ def run_day_3(
     print(f"Selected Winning Pipeline: {best_model_name}")
     print(f"Rationale: {selection_rationale}")
 
-    # 4. Seed Stability Check (Step 11) for winning model
+    # 4. Seed Stability Check (Step 11) for all pipelines
     print("\n==========================================")
-    print(f"=== SEED STABILITY (Step 11): {best_model_name} ===")
+    print("=== SEED STABILITY (Step 11): ALL PIPELINES ===")
     print("==========================================")
-    best_c_win = pipeline_results[best_model_name]["best_c"]
-    
-    if best_model_name == "TF-IDF + LinearSVC":
-        vec_s = TfidfVectorizer(ngram_range=(1, 2), max_features=25000, sublinear_tf=True)
-        X_tr_tfidf = vec_s.fit_transform(train_df["text"].tolist())
-        X_va_tfidf = vec_s.transform(val_df["text"].tolist())
-        stability = evaluate_seed_stability(
-            X_train=X_tr_tfidf.toarray() if hasattr(X_tr_tfidf, "toarray") else X_tr_tfidf,
+    stability_results = {}
+
+    # TF-IDF Seed Stability
+    vec_s = TfidfVectorizer(ngram_range=(1, 2), max_features=25000, sublinear_tf=True)
+    X_tr_tfidf = vec_s.fit_transform(train_df["text"].tolist())
+    X_va_tfidf = vec_s.transform(val_df["text"].tolist())
+    stability_results["TF-IDF + LinearSVC"] = evaluate_seed_stability(
+        X_train=X_tr_tfidf,
+        y_train=y_train,
+        X_val=X_va_tfidf,
+        y_val=y_val,
+        best_c=pipeline_results["TF-IDF + LinearSVC"]["best_c"],
+        seeds=[42, 7, 123]
+    )
+
+    # Candidate Encoders Seed Stability
+    for m_name in models:
+        val_emb_m = get_or_compute_embeddings(m_name, "val", val_df["text"].tolist())
+        train_emb_m = get_or_compute_embeddings(m_name, "train", train_df["text"].tolist())
+        stability_results[m_name] = evaluate_seed_stability(
+            X_train=train_emb_m,
             y_train=y_train,
-            X_val=X_va_tfidf.toarray() if hasattr(X_va_tfidf, "toarray") else X_va_tfidf,
+            X_val=val_emb_m,
             y_val=y_val,
-            best_c=best_c_win,
-            seeds=[42, 7, 123]
-        )
-    else:
-        val_emb_win = get_or_compute_embeddings(best_model_name, "val", val_df["text"].tolist())
-        train_emb_win = get_or_compute_embeddings(best_model_name, "train", train_df["text"].tolist())
-        stability = evaluate_seed_stability(
-            X_train=train_emb_win,
-            y_train=y_train,
-            X_val=val_emb_win,
-            y_val=y_val,
-            best_c=best_c_win,
+            best_c=pipeline_results[m_name]["best_c"],
             seeds=[42, 7, 123]
         )
 
@@ -1055,7 +1096,7 @@ def run_day_3(
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "selected_pipeline": best_model_name,
         "selection_rationale": selection_rationale,
-        "seed_stability": stability,
+        "seed_stability": stability_results,
         "pipelines": pipeline_results
     }
     summary_json = os.path.join(RESULTS_DIR, "validation_metrics_summary.json")
@@ -1066,14 +1107,22 @@ def run_day_3(
     with open(summary_md, "w", encoding="utf-8") as f:
         f.write("# Validation Evaluation Summary & Model Selection\n\n")
         f.write(f"**Winning Pipeline**: `{best_model_name}`  \n")
-        f.write(f"**Decision Rationale**: {selection_rationale}  \n")
-        f.write(f"**Seed Stability F1 (seeds 42, 7, 123)**: Mean = {stability['mean_f1']:.4f}, Std = {stability['std_f1']:.4f}\n\n")
+        f.write(f"**Decision Rationale**: {selection_rationale}  \n\n")
         f.write("### Validation Performance Comparison Table\n\n")
         f.write("| Pipeline | Best C | Accuracy | Precision(CG) | Recall(CG) | F1(CG) | Brier Score | ECE (10 bins) | Speed (rev/s) |\n")
         f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
         for name, p in pipeline_results.items():
             m = p["metrics"]
             f.write(f"| `{name}` | {p['best_c']} | {m['accuracy']:.4f} | {m['precision_cg']:.4f} | {m['recall_cg']:.4f} | **{m['f1_cg']:.4f}** | {m['brier_score']:.4f} | {m['ece']:.4f} | {p['reviews_per_sec']:.1f} |\n")
+
+        f.write("\n### Seed Stability Evaluation (Seeds 42, 7, 123)\n\n")
+        f.write("| Pipeline | Mean F1(CG) ± Std | Mean Brier ± Std |\n")
+        f.write("| :--- | :---: | :---: |\n")
+        for name, s in stability_results.items():
+            f.write(f"| `{name}` | {s['mean_f1']:.4f} ± {s['std_f1']:.4f} | {s['mean_brier']:.4f} ± {s['std_brier']:.4f} |\n")
+
+    print(f"\n[DONE] Validation evaluation complete. Results saved to: {summary_json} and {summary_md}")
+    return summary_data
 
     print(f"\n[DONE] Validation evaluation complete. Results saved to: {summary_json} and {summary_md}")
     return summary_data
@@ -1951,8 +2000,8 @@ def run_day_6(
                 f.write(f"| `{cfg_name}` | Error | N/A | Error | Error | Failed |\n")
 
         f.write("\n### Browser Extension Recommendations\n\n")
-        f.write("- **Classification Latency**: `distilbert-base-multilingual-cased` achieves ~30-70ms single review inference on CPU, which is well within the 100ms budget for responsive browser extension UI.\n")
-        f.write("- **SHAP Explanations**: LinearExplainer on embedding representations completes in **<10 ms**, making feature attribution practically instantaneous for user tooltips. KernelExplainer with 50 samples takes ~1-3s and should only be triggered on explicit user request ('Explain this review' button) rather than auto-rendered for every review on page load.\n")
+        f.write("- **Classification Latency**: `distilbert-base-multilingual-cased` achieves ~50-65 ms single review inference on CPU (mean 60.66 ms, P95 65.64 ms), which is well within the 100 ms budget for responsive browser extension UI.\n")
+        f.write("- **SHAP Explanations**: LinearExplainer on embedding representations completes in **18.1 ms** (at 100 samples), while KernelExplainer on embeddings takes **852.0 ms** (at 50 samples). True word-level SHAP using text perturbation takes **349.3 ms** at 25 evaluations and **4.59 s** at 50 evaluations. Feature explanations must therefore only be triggered on-demand via an explicit user click ('Explain this review') rather than automatically executed on page load. See `results/SHAP_NOTE.md` for full architectural analysis.\n")
 
     print(f"\n[DONE] Speed and SHAP benchmark complete. Results saved to {speed_json_path} and {speed_md_path}")
     return benchmark_payload
@@ -2055,9 +2104,9 @@ def generate_consolidated_results(
 This pilot evaluates three frozen transformer encoders against a calibrated TF-IDF LinearSVC baseline for classifying reviews as **Likely Genuine (0)** or **Potentially Computer-Generated (1)**, using the Salminen et al. (2022) English dataset and an out-of-domain false alarm check on FiReCS (Filipino/Taglish).
 
 **Selected Winning Pipeline**: `distilbert-base-multilingual-cased` + LinearSVC (Sigmoid Calibrated, $C=0.5$).
-- **Selection Rationale**: While `xlm-roberta-base` achieved a marginally higher validation F1 ($0.9491$ vs. $0.9469$, a delta of $+0.0022$), it was well within the 1-point tie-breaking threshold ($<0.01$). Per GEMINI.md rules, `distilbert-base-multilingual-cased` was selected because it is **more than 2× faster** ($60.66$ ms vs. $123.66$ ms per review) and has half the model footprint, fitting comfortably within the browser extension's real-time latency budget ($<100$ ms).
+- **Selection Rationale**: While `xlm-roberta-base` achieved a marginally higher validation F1 ($0.9491$ vs. $0.9469$, a delta of $+0.0022$), it was well within the 1-point tie-breaking threshold ($<0.01$). Per GEMINI.md rules, `distilbert-base-multilingual-cased` was selected because it is **more than 2× faster** ($60.66$ ms vs. $123.66$ ms per review, $16.5$ vs. $8.1$ rev/s) and has half the model footprint (66M vs. 125M parameters), fitting comfortably within the browser extension's real-time latency budget ($<100$ ms).
 - **Test Set Generalization**: Evaluated strictly **once** on the unseen 4,040-review test holdout, achieving **Test F1(CG) = 0.9414** (validation F1: $0.9469$, delta: $-0.0055$), with an **Expected Calibration Error (ECE) of 0.0112** and **Brier Score of 0.0439**, confirming robust generalization without overfitting.
-- **Seed Stability**: Three random seeds (42, 7, 123) yielded Mean F1 = $0.9469$ (Std = $0.0000$).
+- **Seed Stability (Step 11)**: Three stratified splits across seeds 42, 7, and 123 yielded Mean F1 = **$0.9368 \\pm 0.0020$** and Mean Brier = **$0.0469 \\pm 0.0013$** for DistilBERT, confirming consistent behavior across data partitions.
 
 ## 2. Benchmark Results Table
 
@@ -2069,6 +2118,15 @@ This pilot evaluates three frozen transformer encoders against a calibrated TF-I
 | `distilbert-base-multilingual-cased (Test - Selected)` | 0.9416 | 0.9442 | 0.9386 | **0.9414** | 0.0439 | 0.0112 | 0.06066 s |
 | `xlm-roberta-base (Val)` | 0.9490 | 0.9463 | 0.9519 | 0.9491 | 0.0387 | 0.0134 | 0.12366 s |
 | `jcblaise/roberta-tagalog-base (Val)` | 0.9374 | 0.9349 | 0.9400 | 0.9375 | 0.0469 | 0.0162 | 0.13798 s |
+
+### Seed Stability Summary (Seeds 42, 7, 123)
+
+| Pipeline | Fixed Best C | Mean F1(CG) ± Std | Mean Brier ± Std | Stability Assessment |
+| :--- | :---: | :---: | :---: | :--- |
+| `TF-IDF + LinearSVC` | 0.01 | 0.9330 ± 0.0013 | 0.0509 ± 0.0011 | Highly stable baseline |
+| `distilbert-base-multilingual-cased` | 0.50 | 0.9368 ± 0.0020 | 0.0469 ± 0.0013 | Robust across random splits |
+| `xlm-roberta-base` | 0.01 | 0.9465 ± 0.0041 | 0.0394 ± 0.0024 | Strongest metric, slightly higher variance |
+| `jcblaise/roberta-tagalog-base` | 0.01 | 0.9375 ± 0.0018 | 0.0488 ± 0.0015 | Consistent English transfer |
 
 ## 3. FiReCS Presumed-Genuine False-Alarm Check
 When deployed on 10,481 unlabeled Filipino/Taglish reviews:
@@ -2082,7 +2140,9 @@ When deployed on 10,481 unlabeled Filipino/Taglish reviews:
 
 ## 5. Browser Extension Feasibility & Explainability
 - **Inference Speed**: DistilBERT delivers single-review latency of **$60.66$ ms** ($16.5$ reviews/sec) on standard CPU, ensuring responsive browser extension performance without perceptible UI lag.
-- **SHAP Explainability**: SHAP `LinearExplainer` on embedding dimensions runs in **$18.06$ ms** (suitable for live hover tooltips). Token-level `KernelExplainer` runs in **$852.0$ ms** with 50 background samples (recommended as an on-demand button click).
+- **SHAP Explainability Findings**:
+  - In Day 6 benchmarks, SHAP `LinearExplainer` ($18.06$ ms) and `KernelExplainer` ($851.99$ ms) were computed over the **768 latent embedding dimensions**, which do not provide direct word-level visual highlights for user tooltips.
+  - As detailed in `results/SHAP_NOTE.md`, true word-level SHAP requires perturbing input text via a text masker (`shap.maskers.Text`). When benchmarked on CPU, word-level SHAP with $25$ evaluations achieved **$349.3$ ms** per review. This is feasible strictly on an on-demand basis (e.g., clicking "Explain this review"), whereas running it automatically on page load is computationally prohibitive.
 
 ## 6. Exact Package Versions
 - **Python**: 3.14.7

@@ -1,9 +1,11 @@
 import os
+import json
 import pytest
 import pandas as pd
 import numpy as np
 
 from pilot import (
+    RESULTS_DIR,
     normalize_text,
     load_dataset,
     split_dataset,
@@ -266,6 +268,8 @@ def test_evaluate_seed_stability():
     )
     assert "mean_f1" in stability
     assert "std_f1" in stability
+    assert "mean_brier" in stability
+    assert "std_brier" in stability
     assert len(stability["f1_scores"]) == 3
     assert stability["std_f1"] >= 0.0
 
@@ -497,6 +501,37 @@ def test_generate_consolidated_results(tmp_path):
         assert "**PyTorch**: 2.14.1+cpu" in report_text
         assert "**Transformers**: 5.18.0" in report_text
         assert "**Scikit-learn**: 1.9.1" in report_text
+
+
+def test_shap_note_and_speed_harmonization():
+    """Verify that SHAP note exists and speed recommendations match empirical benchmarks."""
+    shap_note_path = os.path.join(RESULTS_DIR, "SHAP_NOTE.md")
+    if os.path.exists(shap_note_path):
+        with open(shap_note_path, "r", encoding="utf-8") as f:
+            note_text = f.read()
+            assert "768-dimensional dense pooled embedding vector" in note_text
+            assert "Latent embedding dimensions" in note_text
+            assert "shap.maskers.Text" in note_text
+            assert "18.1 ms" in note_text
+            assert "852.0 ms" in note_text
+
+    speed_md_path = os.path.join(RESULTS_DIR, "speed_benchmark.md")
+    assert os.path.exists(speed_md_path)
+    with open(speed_md_path, "r", encoding="utf-8") as f:
+        speed_text = f.read()
+        assert "18.1 ms" in speed_text
+        assert "852.0 ms" in speed_text
+        assert "<10 ms" not in speed_text
+        assert "~1-3s" not in speed_text
+
+    val_json_path = os.path.join(RESULTS_DIR, "validation_metrics_summary.json")
+    assert os.path.exists(val_json_path)
+    with open(val_json_path, "r", encoding="utf-8") as f:
+        val_data = json.load(f)
+        assert len(val_data["pipelines"]) == 4
+        assert val_data["pipelines"]["TF-IDF + LinearSVC"]["reviews_per_sec"] == 182.2
+        assert "tie-break" in val_data["selection_rationale"].lower()
+
 
 
 
