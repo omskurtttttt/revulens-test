@@ -24,6 +24,8 @@ from pilot import (
     evaluate_firecs_pipeline,
     benchmark_single_review_latency,
     benchmark_shap_latency,
+    generate_consolidated_results,
+    run_day_7,
 )
 
 def test_normalize_text():
@@ -460,5 +462,41 @@ def test_benchmark_shap_latency():
     assert res["seconds_per_review"] is not None
     assert res["seconds_per_review"] >= 0.0
     assert res["background_sample_limit"] == 10
+
+
+def test_generate_consolidated_results(tmp_path):
+    df_results, report_path = generate_consolidated_results(str(tmp_path))
+
+    required_cols = ["Pipeline", "Accuracy", "Precision(CG)", "Recall(CG)", "F1(CG)", "Brier", "ECE", "seconds per review"]
+    assert list(df_results.columns) == required_cols
+    assert len(df_results) == 6
+
+    # Verify CSV was written
+    csv_file = tmp_path / "results_table.csv"
+    assert os.path.exists(csv_file)
+    csv_df = pd.read_csv(csv_file)
+    assert list(csv_df.columns) == required_cols
+
+    # Verify Markdown table was written
+    md_file = tmp_path / "results_table.md"
+    assert os.path.exists(md_file)
+    with open(md_file, "r", encoding="utf-8") as f:
+        md_text = f.read()
+        assert "| Pipeline | Accuracy | Precision(CG) |" in md_text
+        assert "distilbert-base-multilingual-cased" in md_text
+
+    # Verify REPORT.md was written with all required elements
+    assert os.path.exists(report_path)
+    with open(report_path, "r", encoding="utf-8") as f:
+        report_text = f.read()
+        assert "Executive Summary & Selection Decision" in report_text
+        assert "FiReCS Presumed-Genuine False-Alarm Check" in report_text
+        assert "Methodological Limitations & Strict Caveats" in report_text
+        assert "Exact Package Versions" in report_text
+        assert "**Python**: 3.14.7" in report_text
+        assert "**PyTorch**: 2.14.1+cpu" in report_text
+        assert "**Transformers**: 5.18.0" in report_text
+        assert "**Scikit-learn**: 1.9.1" in report_text
+
 
 
