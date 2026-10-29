@@ -1,0 +1,91 @@
+{
+  "timestamp": "2026-10-29T02:34:41Z",
+  "selected_model": "distilbert-base-multilingual-cased",
+  "best_c": 0.5,
+  "pipelines": {
+    "TF-IDF + LinearSVC": {
+      "validation": {
+        "accuracy": 0.9316662540232731,
+        "precision_cg": 0.9337649402390438,
+        "recall_cg": 0.9291377601585729,
+        "f1_cg": 0.9314456035767511,
+        "brier_score": 0.05251088626366101,
+        "ece": 0.025165902145355204,
+        "mean_conf_correct": 0.922176140562509,
+        "mean_conf_incorrect": 0.7020167607191311,
+        "confusion_matrix": [
+          [
+            1888,
+            133
+          ],
+          [
+            143,
+            1875
+          ]
+        ]
+      },
+      "test": {
+        "accuracy": 0.9264851485148515,
+        "precision_cg": 0.9249382716049382,
+        "recall_cg": 0.9281466798810704,
+        "f1_cg": 0.9265396982438783,
+        "brier_score": 0.052731165597207766,
+        "ece": 0.02099920442251938,
+        "mean_conf_correct": 0.9264772510287327,
+        "mean_conf_incorrect": 0.6976604690122724,
+        "confusion_matrix": [
+          [
+            1870,
+            152
+          ],
+          [
+            145,
+            1873
+          ]
+        ]
+      }
+    },
+    "distilbert-base-multilingual-cased": {
+      "validation": {
+        "accuracy": 0.9465214161921268,
+        "precision_cg": 0.9403714565004888,
+        "recall_cg": 0.9534192269573836,
+        "f1_cg": 0.9468503937007874,
+        "brier_score": 0.04036877272557791,
+        "ece": 0.01616654532674865,
+        "mean_conf_correct": 0.944596082164614,
+        "mean_conf_incorrect": 0.714553096079217,
+        "confusion_matrix": [
+          [
+            1899,
+            122
+          ],
+          [
+            94,
+            1924
+          ]
+        ]
+      },
+      "test": {
+        "accuracy": 0.9415841584158415,
+        "precision_cg": 0.9441674975074775,
+        "recall_cg": 0.9385530227948464,
+        "f1_cg": 0.941351888667992,
+        "brier_score": 0.043919984076603316,
+        "ece": 0.011188350467657752,
+        "mean_conf_correct": 0.9443657697340273,
+        "mean_conf_incorrect": 0.728571921356556,
+        "confusion_matrix": [
+          [
+            1910,
+            112
+          ],
+          [
+            124,
+            1894
+          ]
+        ]
+      }
+    }
+  }
+}

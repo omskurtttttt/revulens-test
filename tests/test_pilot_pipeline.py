@@ -16,6 +16,9 @@ from pilot import (
     select_best_pipeline,
     evaluate_seed_stability,
     plot_confusion_matrices,
+    evaluate_test_set,
+    evaluate_baseline_test_set,
+    plot_reliability_diagram,
 )
 
 def test_normalize_text():
@@ -267,5 +270,79 @@ def test_plot_confusion_matrices(tmp_path):
     }
     out_file = str(tmp_path / "test_cm.png")
     saved_path = plot_confusion_matrices(mock_results, output_path=out_file)
+    assert os.path.exists(saved_path)
+    assert os.path.getsize(saved_path) > 1000
+
+
+def test_evaluate_test_set():
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+
+    np.random.seed(42)
+    X_train = np.random.randn(100, 8)
+    y_train = (X_train[:, 0] > 0).astype(int)
+    X_test = np.random.randn(20, 8)
+    y_test = (X_test[:, 0] > 0).astype(int)
+
+    scaler = StandardScaler().fit(X_train)
+    X_train_scaled = scaler.transform(X_train)
+    base_svc = LinearSVC(C=1.0, random_state=42, dual=False)
+    clf = CalibratedClassifierCV(estimator=base_svc, method="sigmoid", cv=3)
+    clf.fit(X_train_scaled, y_train)
+
+    metrics, probas = evaluate_test_set(clf, scaler, X_test, y_test)
+    assert "accuracy" in metrics
+    assert "precision_cg" in metrics
+    assert "recall_cg" in metrics
+    assert "f1_cg" in metrics
+    assert "brier_score" in metrics
+    assert "ece" in metrics
+    assert len(probas) == len(y_test)
+    assert np.all((probas >= 0.0) & (probas <= 1.0))
+
+
+def test_evaluate_baseline_test_set():
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.svm import LinearSVC
+    from sklearn.calibration import CalibratedClassifierCV
+
+    train_texts = ["great product love it", "terrible waste of money", "excellent quality", "bad broken item"] * 10
+    y_train = np.array([0, 1, 0, 1] * 10)
+    test_texts = ["great quality love it", "horrible broken bad item"]
+    y_test = np.array([0, 1])
+
+    vectorizer = TfidfVectorizer().fit(train_texts)
+    X_tr_tfidf = vectorizer.transform(train_texts)
+    scaler = StandardScaler(with_mean=False).fit(X_tr_tfidf)
+    X_tr_scaled = scaler.transform(X_tr_tfidf)
+
+    base_svc = LinearSVC(C=1.0, random_state=42, dual=False)
+    clf = CalibratedClassifierCV(estimator=base_svc, method="sigmoid", cv=3)
+    clf.fit(X_tr_scaled, y_train)
+
+    metrics, probas = evaluate_baseline_test_set(clf, scaler, vectorizer, test_texts, y_test)
+    assert "accuracy" in metrics
+    assert "f1_cg" in metrics
+    assert len(probas) == len(y_test)
+    assert np.all((probas >= 0.0) & (probas <= 1.0))
+
+
+def test_plot_reliability_diagram(tmp_path):
+    mock_data = {
+        "Validation": {
+            "y_true": np.array([0, 0, 1, 1, 0, 1, 0, 1]),
+            "y_prob": np.array([0.1, 0.2, 0.8, 0.9, 0.15, 0.85, 0.3, 0.7]),
+            "label": "TestPipeline (Val)"
+        },
+        "Test": {
+            "y_true": np.array([0, 0, 1, 1, 0, 1, 0, 1]),
+            "y_prob": np.array([0.12, 0.18, 0.82, 0.88, 0.14, 0.86, 0.28, 0.72]),
+            "label": "TestPipeline (Test)"
+        }
+    }
+    out_file = str(tmp_path / "test_reliability.png")
+    saved_path = plot_reliability_diagram(mock_data, output_path=out_file, n_bins=5)
     assert os.path.exists(saved_path)
     assert os.path.getsize(saved_path) > 1000

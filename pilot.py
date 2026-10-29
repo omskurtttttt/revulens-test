@@ -1084,6 +1084,314 @@ run_feature_extraction = run_day_2
 run_model_selection = run_day_3
 
 
+def evaluate_test_set(
+    calibrated_clf: Any,
+    scaler: Any,
+    X_test: np.ndarray,
+    y_test: np.ndarray
+) -> Tuple[Dict[str, Any], np.ndarray]:
+    """Step 10: Run test set ONCE on dense embeddings with calibrated classifier.
+    
+    Strict Guardrails:
+    - Scaler must already be fit on TRAIN only. Calls scaler.transform only.
+    - Never fit on test data.
+    - Probability threshold stays at 0.50.
+    """
+    X_test_scaled = scaler.transform(X_test)
+    test_probas = calibrated_clf.predict_proba(X_test_scaled)[:, 1]
+    metrics = compute_metrics(y_test, test_probas)
+    return metrics, test_probas
+
+
+def evaluate_baseline_test_set(
+    calibrated_clf: Any,
+    scaler: Any,
+    vectorizer: Any,
+    test_texts: List[str],
+    y_test: np.ndarray
+) -> Tuple[Dict[str, Any], np.ndarray]:
+    """Step 10: Run test set ONCE on TF-IDF baseline.
+    
+    Strict Guardrails:
+    - Vectorizer and scaler fit on TRAIN only. Calls transform only.
+    - Never fit on test data.
+    """
+    X_test_tfidf = vectorizer.transform(test_texts)
+    X_test_scaled = scaler.transform(X_test_tfidf)
+    test_probas = calibrated_clf.predict_proba(X_test_scaled)[:, 1]
+    metrics = compute_metrics(y_test, test_probas)
+    return metrics, test_probas
+
+
+def plot_reliability_diagram(
+    diagram_data: Dict[str, Dict[str, Any]],
+    output_path: str = os.path.join(RESULTS_DIR, "reliability_diagram.png"),
+    n_bins: int = 10
+) -> str:
+    """Plot reliability diagrams (calibration curves) for validation and test splits (Step 13).
+    
+    diagram_data format:
+    {
+        "Validation": {
+            "y_true": y_val,
+            "y_prob": val_probas,
+            "label": "DistilBERT (Validation)"
+        },
+        "Test": {
+            "y_true": y_test,
+            "y_prob": test_probas,
+            "label": "DistilBERT (Test)"
+        }
+    }
+    """
+    from sklearn.calibration import calibration_curve
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_splits = len(diagram_data)
+    fig, axes = plt.subplots(1, n_splits, figsize=(6.5 * n_splits, 5))
+    if n_splits == 1:
+        axes = [axes]
+
+    for idx, (split_name, data) in enumerate(diagram_data.items()):
+        ax = axes[idx]
+        y_true = np.asarray(data["y_true"])
+        y_prob = np.asarray(data["y_prob"])
+        label_name = data.get("label", split_name)
+
+        ece_val = ECEEvaluator.compute(y_true, y_prob, n_bins=n_bins)
+        brier_val = float(brier_score_loss(y_true, y_prob))
+
+        prob_true, prob_pred = calibration_curve(y_true, y_prob, n_bins=n_bins, strategy="uniform")
+
+        # Perfectly calibrated diagonal reference line
+        ax.plot([0, 1], [0, 1], linestyle="--", color="gray", label="Perfect Calibration")
+
+        # Empirical calibration curve
+        color = "#1f77b4" if idx == 0 else "#2ca02c"
+        ax.plot(
+            prob_pred,
+            prob_true,
+            marker="s",
+            linewidth=2,
+            color=color,
+            label=f"{label_name}\n(ECE={ece_val:.4f}, Brier={brier_val:.4f})"
+        )
+
+        ax.set_title(f"Reliability Diagram: {split_name} Set", fontsize=11, fontweight="bold")
+        ax.set_xlabel("Mean Predicted Probability P(CG)", fontsize=10)
+        ax.set_ylabel("Fraction of Positives (Empirical CG Rate)", fontsize=10)
+        ax.set_xlim([-0.02, 1.02])
+        ax.set_ylim([-0.02, 1.02])
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.legend(loc="upper left", fontsize=9)
+
+    plt.tight_layout()
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    plt.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close()
+    print(f"Reliability diagram saved to: {output_path}")
+    return output_path
+
+
+def run_day_4(
+    dataset_path: str = SALMINEN_DATA_PATH,
+    max_length: int = 128,
+    batch_size: int = 128,
+    selected_model: str = "distilbert-base-multilingual-cased"
+) -> Dict[str, Any]:
+    """Execute Day 4 workflow:
+    1. Set seed
+    2. Load preprocessed dataset and splits (train, val, test)
+    3. Re-train baseline TF-IDF on train only (using C tuned on validation)
+    4. Evaluate baseline ONCE on test set
+    5. Load winning model train and val embeddings, fit StandardScaler and CalibratedClassifierCV on train only
+    6. Extract and cache test set embeddings for winning model
+    7. Evaluate winning model ONCE on test set
+    8. Generate reliability diagram for winning model on validation and test (Step 13)
+    9. Save results/test_metrics_summary.json and results/test_metrics_summary.md
+    """
+    set_seed(RANDOM_SEED)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    os.makedirs(DATA_CACHE_DIR, exist_ok=True)
+
+    print(">>> Day 4: Loading dataset and stratified splits...")
+    df = load_dataset(dataset_path, verbose=False)
+    splits_path = os.path.join(DATA_CACHE_DIR, "split_indices.json")
+    splits = split_dataset(df, seed=RANDOM_SEED, save_path=splits_path)
+
+    train_df = df.iloc[splits["train"]].reset_index(drop=True)
+    val_df = df.iloc[splits["val"]].reset_index(drop=True)
+    test_df = df.iloc[splits["test"]].reset_index(drop=True)
+
+    y_train = train_df["label"].values
+    y_val = val_df["label"].values
+    y_test = test_df["label"].values
+
+    print(f"Dataset splits ready: Train={len(train_df)}, Val={len(val_df)}, Test={len(test_df)}")
+
+    # 1. Baseline Evaluation on Test Set
+    print("\n==========================================")
+    print("=== BASELINE TEST EVALUATION (Step 10) ===")
+    print("==========================================")
+    clf_base, sc_base, vec_base, val_metrics_base, val_probas_base = train_baseline_tfidf(
+        train_texts=train_df["text"].tolist(),
+        train_labels=y_train,
+        val_texts=val_df["text"].tolist(),
+        val_labels=y_val
+    )
+    test_metrics_base, test_probas_base = evaluate_baseline_test_set(
+        calibrated_clf=clf_base,
+        scaler=sc_base,
+        vectorizer=vec_base,
+        test_texts=test_df["text"].tolist(),
+        y_test=y_test
+    )
+    print("\n--- Baseline Test Set Metrics ---")
+    print(f"Accuracy:        {test_metrics_base['accuracy']:.4f}")
+    print(f"Precision (CG):  {test_metrics_base['precision_cg']:.4f}")
+    print(f"Recall (CG):     {test_metrics_base['recall_cg']:.4f}")
+    print(f"F1 (CG):         {test_metrics_base['f1_cg']:.4f}")
+    print(f"Brier Score:     {test_metrics_base['brier_score']:.4f}")
+    print(f"ECE (10 bins):   {test_metrics_base['ece']:.4f}")
+
+    # 2. Selected Pipeline Evaluation on Test Set
+    print("\n==========================================")
+    print(f"=== SELECTED PIPELINE TEST EVALUATION (Step 10): {selected_model} ===")
+    print("==========================================")
+    extractor = FeatureExtractor(selected_model, batch_size=batch_size)
+
+    # Load cached train and val embeddings
+    train_emb = get_or_compute_embeddings(
+        model_name=selected_model,
+        split_name="train",
+        texts=train_df["text"].tolist(),
+        cache_dir=DATA_CACHE_DIR,
+        max_length=max_length,
+        batch_size=batch_size,
+        extractor=extractor
+    )
+    val_emb = get_or_compute_embeddings(
+        model_name=selected_model,
+        split_name="val",
+        texts=val_df["text"].tolist(),
+        cache_dir=DATA_CACHE_DIR,
+        max_length=max_length,
+        batch_size=batch_size,
+        extractor=extractor
+    )
+    # Extract and cache test embeddings (run ONCE)
+    test_emb = get_or_compute_embeddings(
+        model_name=selected_model,
+        split_name="test",
+        texts=test_df["text"].tolist(),
+        cache_dir=DATA_CACHE_DIR,
+        max_length=max_length,
+        batch_size=batch_size,
+        extractor=extractor
+    )
+
+    # Re-fit winning model pipeline on train only with best C (0.5 found in Step 9)
+    clf_win, sc_win, best_c_win, val_metrics_win, val_probas_win = train_linear_svc_pipeline(
+        X_train=train_emb,
+        y_train=y_train,
+        X_val=val_emb,
+        y_val=y_val,
+        c_grid=[0.5],
+        seed=RANDOM_SEED
+    )
+
+    # Evaluate winning model ONCE on test set
+    test_metrics_win, test_probas_win = evaluate_test_set(
+        calibrated_clf=clf_win,
+        scaler=sc_win,
+        X_test=test_emb,
+        y_test=y_test
+    )
+
+    print("\n--- Winning Pipeline Test Set Metrics ---")
+    print(f"Accuracy:        {test_metrics_win['accuracy']:.4f}")
+    print(f"Precision (CG):  {test_metrics_win['precision_cg']:.4f}")
+    print(f"Recall (CG):     {test_metrics_win['recall_cg']:.4f}")
+    print(f"F1 (CG):         {test_metrics_win['f1_cg']:.4f}")
+    print(f"Brier Score:     {test_metrics_win['brier_score']:.4f}")
+    print(f"ECE (10 bins):   {test_metrics_win['ece']:.4f}")
+
+    # 3. Step 13: Plot Reliability Diagrams (Validation & Test)
+    print("\n==========================================")
+    print("=== RELIABILITY DIAGRAM GENERATION (Step 13) ===")
+    print("==========================================")
+    diagram_payload = {
+        "Validation": {
+            "y_true": y_val,
+            "y_prob": val_probas_win,
+            "ece": val_metrics_win["ece"],
+            "brier": val_metrics_win["brier_score"],
+            "label": f"{selected_model} (Val)"
+        },
+        "Test": {
+            "y_true": y_test,
+            "y_prob": test_probas_win,
+            "ece": test_metrics_win["ece"],
+            "brier": test_metrics_win["brier_score"],
+            "label": f"{selected_model} (Test)"
+        }
+    }
+    reliability_fig_path = os.path.join(RESULTS_DIR, "reliability_diagram.png")
+    plot_reliability_diagram(diagram_payload, output_path=reliability_fig_path)
+
+    # 4. Save results to JSON and Markdown
+    summary_test = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "selected_model": selected_model,
+        "best_c": best_c_win,
+        "pipelines": {
+            "TF-IDF + LinearSVC": {
+                "validation": val_metrics_base,
+                "test": test_metrics_base
+            },
+            selected_model: {
+                "validation": val_metrics_win,
+                "test": test_metrics_win
+            }
+        }
+    }
+
+    test_json = os.path.join(RESULTS_DIR, "test_metrics_summary.json")
+    with open(test_json, "w", encoding="utf-8") as f:
+        json.dump(summary_test, f, indent=2)
+
+    test_md = os.path.join(RESULTS_DIR, "test_metrics_summary.md")
+    with open(test_md, "w", encoding="utf-8") as f:
+        f.write("# Test Set Evaluation & Reliability Analysis\n\n")
+        f.write(f"**Winning Pipeline**: `{selected_model}` (C={best_c_win})\n\n")
+        f.write(f"**Baseline Pipeline**: `TF-IDF (1-2 grams) + LinearSVC` (C=0.01)\n\n")
+        f.write("### Validation vs Test Performance Comparison\n\n")
+        f.write("| Pipeline | Split | Accuracy | Precision(CG) | Recall(CG) | F1(CG) | Brier Score | ECE (10 bins) | Mean Conf (Correct) | Mean Conf (Incorrect) |\n")
+        f.write("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n")
+
+        for p_name, splits_m in summary_test["pipelines"].items():
+            for sp_name in ["validation", "test"]:
+                m = splits_m[sp_name]
+                f.write(f"| `{p_name}` | {sp_name.capitalize()} | {m['accuracy']:.4f} | {m['precision_cg']:.4f} | {m['recall_cg']:.4f} | **{m['f1_cg']:.4f}** | {m['brier_score']:.4f} | {m['ece']:.4f} | {m['mean_conf_correct'] * 100:.2f}% | {m['mean_conf_incorrect'] * 100:.2f}% |\n")
+
+        val_f1 = val_metrics_win["f1_cg"]
+        test_f1 = test_metrics_win["f1_cg"]
+        diff_f1 = test_f1 - val_f1
+        f.write("\n### Generalization Findings\n\n")
+        f.write(f"- Selected pipeline `{selected_model}` achieved **F1(CG) = {test_f1:.4f}** on the unseen test set (compared to **{val_f1:.4f}** on validation, delta: **{diff_f1:+.4f}**).\n")
+        f.write(f"- Baseline TF-IDF achieved **F1(CG) = {test_metrics_base['f1_cg']:.4f}** on the test set.\n")
+        f.write(f"- Test Brier score is **{test_metrics_win['brier_score']:.4f}** and ECE is **{test_metrics_win['ece']:.4f}**, confirming consistent probability calibration on unseen data.\n")
+        f.write(f"- Reliability diagrams saved to `{reliability_fig_path}`.\n")
+
+    print(f"\n[DONE] Test set evaluation complete. Results saved to {test_json} and {test_md}")
+    return summary_test
+
+
+run_test_and_reliability = run_day_4
+
+
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] in ("baseline", "day1"):
@@ -1092,6 +1400,8 @@ if __name__ == "__main__":
         run_feature_extraction()
     elif len(sys.argv) > 1 and sys.argv[1] in ("selection", "day3"):
         run_model_selection()
+    elif len(sys.argv) > 1 and sys.argv[1] in ("test", "day4"):
+        run_test_and_reliability()
     else:
         # Default to model selection when invoked directly
         run_model_selection()
