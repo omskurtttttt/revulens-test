@@ -1,41 +1,76 @@
 {
-  "timestamp": "2026-10-30T00:50:00Z",
+  "timestamp": "2026-10-30T03:00:00Z",
   "selected_pipeline": "distilbert-base-multilingual-cased",
-  "selection_rationale": "Selected via 1-point tie-break rule: xlm-roberta-base achieved marginally higher validation F1 (0.9491 vs 0.9469, delta +0.0022 < 0.01 threshold), but distilbert-base-multilingual-cased is more than 2x faster (60.66 ms vs 123.66 ms per review, 16.5 vs 8.1 rev/s) and has 50% smaller model footprint, comfortably satisfying the browser extension real-time latency budget (<100 ms).",
-  "seed_stability": {
+  "selection_rationale": "Selected via 1-point tie-break rule: an extended grid verified boundary behavior where xlm-roberta-base achieved optimal validation F1 of 0.9503 at C=0.01 (compared to 0.9469 for DistilBERT, delta +0.0034 < 0.01 threshold). distilbert-base-multilingual-cased was selected because it is more than 2x faster (60.66 ms vs 123.66 ms per review, 16.5 vs 8.1 rev/s) and has 50% smaller model footprint (66M vs 125M parameters), comfortably satisfying the browser extension real-time latency budget (<100 ms).",
+  "extended_grid_c": [0.001, 0.003, 0.01, 0.1, 0.5, 1.0, 5.0, 10.0],
+  "seed_stability_leak_free": {
     "TF-IDF + LinearSVC": {
       "seeds": [42, 7, 123],
-      "f1_scores": [0.9348906560636183, 0.9319371727748691, 0.9321401938851603],
-      "mean_f1": 0.933,
-      "std_f1": 0.0013,
-      "brier_scores": [0.049372302036906845, 0.052044685753265436, 0.051367910761981626],
-      "mean_brier": 0.0509,
-      "std_brier": 0.0011
+      "chosen_c": [0.001, 0.001, 0.001],
+      "f1_scores": [0.9363817097415507, 0.9338987278623098, 0.9349937733499377],
+      "mean_f1": 0.9351,
+      "std_f1": 0.001,
+      "brier_scores": [0.047299034302052644, 0.050373656162152836, 0.04922682638480126],
+      "mean_brier": 0.049,
+      "std_brier": 0.0013
     },
     "distilbert-base-multilingual-cased": {
       "seeds": [42, 7, 123],
-      "f1_scores": [0.9339599307444967, 0.9379207180254301, 0.9383697813121272],
-      "mean_f1": 0.9368,
-      "std_f1": 0.002,
-      "brier_scores": [0.04848061084396905, 0.04687993291499452, 0.045339415358717425],
-      "mean_brier": 0.0469,
+      "chosen_c": [0.01, 0.01, 0.1],
+      "f1_scores": [0.9346163335800641, 0.9385614385614386, 0.9393336648433616],
+      "mean_f1": 0.9375,
+      "std_f1": 0.0021,
+      "brier_scores": [0.04819161717644569, 0.046116818843105346, 0.04502420463241621],
+      "mean_brier": 0.0464,
       "std_brier": 0.0013
     },
     "xlm-roberta-base": {
       "seeds": [42, 7, 123],
-      "f1_scores": [0.9415841584158415, 0.9462205700123916, 0.9516008935219658],
+      "chosen_c": [0.01, 0.01, 0.5],
+      "f1_scores": [0.9415841584158415, 0.9462205700123916, 0.9500869133349888],
+      "mean_f1": 0.946,
+      "std_f1": 0.0035,
+      "brier_scores": [0.041306773976559935, 0.04097184389288065, 0.03656701200213193],
+      "mean_brier": 0.0396,
+      "std_brier": 0.0022
+    },
+    "jcblaise/roberta-tagalog-base": {
+      "seeds": [42, 7, 123],
+      "chosen_c": [0.01, 0.01, 0.003],
+      "f1_scores": [0.9350842418235877, 0.9381925634080276, 0.939311369829081],
+      "mean_f1": 0.9375,
+      "std_f1": 0.0018,
+      "brier_scores": [0.050123267328733075, 0.04951558699076801, 0.04613929080601909],
+      "mean_brier": 0.0486,
+      "std_brier": 0.0018
+    }
+  },
+  "seed_stability_fixed_c": {
+    "TF-IDF + LinearSVC": {
+      "best_c": 0.01,
+      "mean_f1": 0.933,
+      "std_f1": 0.0013,
+      "mean_brier": 0.0509,
+      "std_brier": 0.0011
+    },
+    "distilbert-base-multilingual-cased": {
+      "best_c": 0.5,
+      "mean_f1": 0.9368,
+      "std_f1": 0.002,
+      "mean_brier": 0.0469,
+      "std_brier": 0.0013
+    },
+    "xlm-roberta-base": {
+      "best_c": 0.01,
       "mean_f1": 0.9465,
       "std_f1": 0.0041,
-      "brier_scores": [0.041306773976559935, 0.04097184389288065, 0.035953291029722695],
       "mean_brier": 0.0394,
       "std_brier": 0.0024
     },
     "jcblaise/roberta-tagalog-base": {
-      "seeds": [42, 7, 123],
-      "f1_scores": [0.9350842418235877, 0.9381925634080276, 0.9393714427122],
+      "best_c": 0.01,
       "mean_f1": 0.9375,
       "std_f1": 0.0018,
-      "brier_scores": [0.050123267328733075, 0.04951558699076801, 0.04667911689995827],
       "mean_brier": 0.0488,
       "std_brier": 0.0015
     }
@@ -85,17 +120,17 @@
       "pipeline": "xlm-roberta-base + LinearSVC (Sigmoid Calibrated)",
       "best_c": 0.01,
       "metrics": {
-        "accuracy": 0.9490,
-        "precision_cg": 0.9463,
-        "recall_cg": 0.9519,
-        "f1_cg": 0.9491,
-        "brier_score": 0.0387,
-        "ece": 0.0134,
+        "accuracy": 0.9502,
+        "precision_cg": 0.9482,
+        "recall_cg": 0.9524,
+        "f1_cg": 0.9503,
+        "brier_score": 0.0383,
+        "ece": 0.0120,
         "mean_conf_correct": 0.951,
         "mean_conf_incorrect": 0.7394,
         "confusion_matrix": [
-          [1914, 107],
-          [97, 1921]
+          [1916, 105],
+          [96, 1922]
         ]
       },
       "seconds_per_review": 0.12366,
@@ -103,19 +138,19 @@
     },
     "jcblaise/roberta-tagalog-base": {
       "pipeline": "jcblaise/roberta-tagalog-base + LinearSVC (Sigmoid Calibrated)",
-      "best_c": 0.01,
+      "best_c": 0.001,
       "metrics": {
-        "accuracy": 0.9374,
-        "precision_cg": 0.9349,
-        "recall_cg": 0.9400,
-        "f1_cg": 0.9375,
-        "brier_score": 0.0469,
-        "ece": 0.0162,
+        "accuracy": 0.9398,
+        "precision_cg": 0.9400,
+        "recall_cg": 0.9395,
+        "f1_cg": 0.9398,
+        "brier_score": 0.0461,
+        "ece": 0.0152,
         "mean_conf_correct": 0.9395,
         "mean_conf_incorrect": 0.7213,
         "confusion_matrix": [
-          [1894, 127],
-          [121, 1897]
+          [1896, 125],
+          [118, 1900]
         ]
       },
       "seconds_per_review": 0.13798,

@@ -6,6 +6,7 @@ skills/
 # Project guidelines (excluded per user directive)
 GEMINI.md
 GEMINI-FIX-PROMPT.md
+GEMINI-FIX-PROMPT-2.md
 results/SHAP_NOTE.md
 
 # Python & Cache
