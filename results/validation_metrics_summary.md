@@ -1,7 +1,7 @@
 # Validation Evaluation Summary & Model Selection
 
 **Winning Pipeline**: `distilbert-base-multilingual-cased`  
-**Decision Rationale**: Selected via 1-point tie-break rule: an extended grid verified boundary behavior where `xlm-roberta-base` achieved optimal validation F1 of 0.9503 at C=0.01 (compared to 0.9469 for DistilBERT, delta +0.0034 < 0.01 threshold). `distilbert-base-multilingual-cased` was selected because it is more than 2× faster (60.66 ms vs 123.66 ms per review, 16.5 vs 8.1 rev/s) and has 50% smaller model footprint (66M vs 125M parameters), comfortably satisfying the browser extension real-time latency budget (<100 ms).  
+**Decision Rationale**: Selected via 1-point tie-break rule: an extended grid verified boundary behavior where `xlm-roberta-base` achieved optimal validation F1 of 0.9503 at C=0.01 (compared to 0.9469 for DistilBERT, delta +0.0034 < 0.01 threshold). `distilbert-base-multilingual-cased` was selected because it is more than 2× faster on CPU (60.66 ms vs 123.66 ms per review, ~61 ms vs ~124 ms; 16.5 vs 8.1 rev/s) and has approximately half the parameter footprint (verified at **134.7M vs. 278.0M parameters** on Hugging Face), comfortably satisfying the browser extension real-time latency budget (<100 ms).  
 
 ---
 

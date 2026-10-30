@@ -1,7 +1,7 @@
 {
   "timestamp": "2026-10-30T03:00:00Z",
   "selected_pipeline": "distilbert-base-multilingual-cased",
-  "selection_rationale": "Selected via 1-point tie-break rule: an extended grid verified boundary behavior where xlm-roberta-base achieved optimal validation F1 of 0.9503 at C=0.01 (compared to 0.9469 for DistilBERT, delta +0.0034 < 0.01 threshold). distilbert-base-multilingual-cased was selected because it is more than 2x faster (60.66 ms vs 123.66 ms per review, 16.5 vs 8.1 rev/s) and has 50% smaller model footprint (66M vs 125M parameters), comfortably satisfying the browser extension real-time latency budget (<100 ms).",
+  "selection_rationale": "Selected via 1-point tie-break rule: an extended grid verified boundary behavior where xlm-roberta-base achieved optimal validation F1 of 0.9503 at C=0.01 (compared to 0.9469 for DistilBERT, delta +0.0034 < 0.01 threshold). distilbert-base-multilingual-cased was selected because it is more than 2x faster on CPU (60.66 ms vs 123.66 ms per review, ~61 ms vs ~124 ms; 16.5 vs 8.1 rev/s) and has approximately half the parameter footprint (verified at 134.7M vs 278.0M parameters on Hugging Face), comfortably satisfying the browser extension real-time latency budget (<100 ms).",
   "extended_grid_c": [0.001, 0.003, 0.01, 0.1, 0.5, 1.0, 5.0, 10.0],
   "seed_stability_leak_free": {
     "TF-IDF + LinearSVC": {
